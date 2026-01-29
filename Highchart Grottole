@@ -1,0 +1,1239 @@
+// ============================================================
+// 20260129 - 4  Single-Plant Highcharts (Standard-Zoom + Pad-Linie ohne Tooltip)
+// WICHTIGES ZIEL:
+// - Tooltips/Timestamps dürfen NIEMALS für "erfundene" Punkte erscheinen.
+// Lösung:
+// - Jede echte Serie bekommt eine 2. "Pad"-Serie (linkedTo) die:
+//   - enableMouseTracking:false  => kein Tooltip, kein Timestamp
+//   - showInLegend:false         => taucht nicht in Legende auf
+//   - optional gestrichelt       => klare Kennzeichnung
+// - Hauptserie enthält NUR echte Archivpunkte (keine Randpunkte, keine Current-Linie)
+// - Padserie zeichnet nur Fallback-Linien (Rand/NoData/Current) OHNE Tooltip
+// ============================================================
+
+const manualDefinitions = [
+
+];
+
+let chart;
+let liveMode = false;
+let liveTimer = null;
+let language = null;
+
+// SortOrder (Array) oder null
+let sortList = null;
+
+// Rolling-Window im Live-Modus (Default 1h)
+let liveWindowMs = 3600 * 1000;
+
+const q = webMI.query;
+
+// Config
+const browseAll = false;
+const configAddr = "AGENT.OBJECTS.System.Diagramme.Konfiguriert";
+
+// Intern
+let suppressAfterSetExtremes = false;
+
+// ============================================================
+// 1) HELFER
+// ============================================================
+function toLocalDatetimeString(date) {
+  function pad(n) { return n.toString().padStart(2, "0"); }
+  return (
+    date.getFullYear() + "-" +
+    pad(date.getMonth() + 1) + "-" +
+    pad(date.getDate()) + "T" +
+    pad(date.getHours()) + ":" +
+    pad(date.getMinutes()) + ":" +
+    pad(date.getSeconds())
+  );
+}
+
+function parseConfig(raw) {
+  try { return typeof raw === "string" ? JSON.parse(raw) : raw; }
+  catch (e) { return null; }
+}
+
+function parseMaybeJson(v) {
+  if (v == null) return v;
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return v;
+    if (s[0] === "{" || s[0] === "[") {
+      try { return JSON.parse(s); } catch (e) { return v; }
+    }
+  }
+  return v;
+}
+
+function normalizeAddress(addr) {
+  if (typeof addr !== "string") return addr;
+  return addr.replace(/^\s*(v:|g:|n:)\s*/i, "").trim();
+}
+
+function parseAnyNumber(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "boolean") return v ? 1 : 0;
+
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true" || s === "on" || s === "ein" || s === "1") return 1;
+    if (s === "false" || s === "off" || s === "aus" || s === "0") return 0;
+    const n = parseFloat(s.replace(",", "."));
+    return isNaN(n) ? NaN : n;
+  }
+
+  if (v && typeof v === "object") {
+    if (typeof v.value === "number") return v.value;
+    if (typeof v.de === "string") return parseAnyNumber(v.de);
+    if (typeof v.en === "string") return parseAnyNumber(v.en);
+  }
+
+  return NaN;
+}
+
+function normalizeResultToXY(res) {
+  if (!res || !res.result) return [];
+
+  const data = [];
+  for (let i = 0; i < res.result.length; i++) {
+    const p = res.result[i];
+
+    let ts = p.timestamp;
+    if (typeof ts === "string") {
+      const parsed = Date.parse(ts);
+      ts = isNaN(parsed) ? null : parsed;
+    } else if (ts && typeof ts === "object" && typeof ts.getTime === "function") {
+      ts = ts.getTime();
+    } else if (typeof ts !== "number") {
+      ts = null;
+    }
+
+    const val = parseAnyNumber(p.value);
+    if (ts === null) continue;
+    if (isNaN(val)) continue;
+
+    data.push([ts, val]);
+  }
+
+  data.sort(function (a, b) { return a[0] - b[0]; });
+
+  // dedupe gleiche timestamps
+  const out = [];
+  for (let j = 0; j < data.length; j++) {
+    if (out.length === 0) out.push(data[j]);
+    else {
+      const last = out[out.length - 1];
+      if (data[j][0] === last[0]) last[1] = data[j][1];
+      else out.push(data[j]);
+    }
+  }
+
+  return out;
+}
+
+function getTimeRange() {
+  const from = new Date(document.getElementById("startTime").value);
+  const to = new Date(document.getElementById("endTime").value);
+  return { from: from, to: to };
+}
+
+function setTimeRangeInputs(fromMs, toMs) {
+  const fromEl = document.getElementById("startTime");
+  const toEl = document.getElementById("endTime");
+  if (fromEl) fromEl.value = toLocalDatetimeString(new Date(fromMs));
+  if (toEl) toEl.value = toLocalDatetimeString(new Date(toMs));
+}
+
+function isTagesprogrammAddress(address) {
+  return /^AGENT\.OBJECTS\.System\.Tagesprogramm\./i.test(address);
+}
+
+// ============================================================
+// 1b) PAD-SERIE (Fallback-Linien OHNE Tooltip)
+// ============================================================
+function seriesIdFromAddress(address) {
+  const a = normalizeAddress(address || "");
+  return "s_" + a.replace(/[^a-z0-9]+/gi, "_");
+}
+
+function addSeriesWithPad(mainOptions) {
+  if (!chart) return null;
+
+  const addr = normalizeAddress(mainOptions.address || "");
+  const mainId = seriesIdFromAddress(addr);
+  const padId = mainId + "_pad";
+
+  // Hauptserie (nur echte Daten!)
+  const main = chart.addSeries(
+    {
+      id: mainId,
+      name: mainOptions.name,
+      data: [],
+      address: addr,
+      visible: !!mainOptions.visible,
+      type: mainOptions.type || "line",
+      yAxis: mainOptions.yAxis,
+      loaded: false,
+      group: mainOptions.group,
+      subgroup: mainOptions.subgroup || null,
+      step: mainOptions.step,
+      dataType: mainOptions.dataType || null,
+      plant: mainOptions.plant || null,
+
+      // Link zur Pad-Serie
+      padSeriesId: padId
+    },
+    false
+  );
+
+  // Pad-Serie (darf künstliche Punkte haben, aber KEIN Tooltip!)
+  const pad = chart.addSeries(
+    {
+      id: padId,
+      name: mainOptions.name,
+      data: [],
+      type: mainOptions.type || "line",
+      yAxis: mainOptions.yAxis,
+
+      // linkedTo hilft bei Farbe/Visibility – aber wir setzen Farbe zusätzlich explizit
+      linkedTo: mainId,
+
+      showInLegend: false,
+      enableMouseTracking: false,
+      states: { hover: { enabled: false } },
+      marker: { enabled: false },
+
+      dashStyle: "Solid",
+      lineWidth: 2,
+      visible: !!mainOptions.visible,
+      isPadSeries: true
+    },
+    false
+  );
+
+  // FARBE GARANTIEREN (gleich wie Hauptserie)
+  // main.color ist nach addSeries i.d.R. gesetzt (auch mit Theme).
+  // Wir setzen sowohl "color" als auch "lineColor", damit Export/Theme nicht reinfunkt.
+  try {
+    const c = main && main.color ? main.color : null;
+    if (c) {
+      pad.update(
+        {
+          color: c,
+          lineColor: c,
+          marker: { lineColor: c, fillColor: c }
+        },
+        false
+      );
+    }
+  } catch (e) {
+    // bewusst leer
+  }
+
+  return main;
+}
+
+
+function getPadSeriesFor(mainSeries) {
+  if (!chart || !mainSeries) return null;
+  const padId = mainSeries.options && mainSeries.options.padSeriesId;
+  if (!padId) return null;
+  return chart.get(padId) || null;
+}
+
+// ============================================================
+// 2) BROWSE HELPERS (Single-Plant)
+// ============================================================
+function walkAny(nodeOrMap, out, predicate) {
+  if (!nodeOrMap) return;
+
+  if (
+    typeof nodeOrMap === "object" &&
+    (Object.prototype.hasOwnProperty.call(nodeOrMap, "name") ||
+     Object.prototype.hasOwnProperty.call(nodeOrMap, "childs"))
+  ) {
+    const name = nodeOrMap.name;
+    if (name && predicate(name)) out.push(name);
+
+    const kids = nodeOrMap.childs ? Object.values(nodeOrMap.childs) : null;
+    if (kids && kids.length) {
+      for (let i = 0; i < kids.length; i++) walkAny(kids[i], out, predicate);
+    }
+    return;
+  }
+
+  if (typeof nodeOrMap === "object") {
+    const values = Object.values(nodeOrMap);
+    for (let i = 0; i < values.length; i++) walkAny(values[i], out, predicate);
+  }
+}
+
+function collectAnlageIOs(treeData) {
+  const out = [];
+  const rx =
+    /^AGENT\.OBJECTS\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+
+  function want(addr) {
+    return typeof addr === "string" && rx.test(addr);
+  }
+  walkAny(treeData, out, want);
+  return out;
+}
+
+function collectTagesprogramm(treeData) {
+  const out = [];
+  const rx =
+    /^AGENT\.OBJECTS\.System\.Tagesprogramm\.[^.]+\.Heute\.IW_Menge_Tag$/i;
+
+  function want(addr) {
+    return typeof addr === "string" && rx.test(addr);
+  }
+  walkAny(treeData, out, want);
+  return out;
+}
+
+// ============================================================
+// 3) SERIES DEFINITION
+// ============================================================
+function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
+  addr = normalizeAddress(addr);
+  const parts = addr.split(".");
+
+  let name = parts[parts.length - 3] || addr;
+  let group = groupOverride || "Ungruppiert";
+  let yAxis = 0;
+  let step = false;
+  let tryDetectType = null;
+  let subgroup = null;
+
+  // Anlage:
+  if (/^AGENT\.OBJECTS\.Anlage\./i.test(addr)) {
+    group = groupOverride || parts[3] || "Anlage";
+    name = parts[4] || "?";
+
+    if (/\.Zustand$|\.Status$/i.test(addr)) {
+      yAxis = 1;
+      step = true;
+    } else if (/\.Aktiver_Istwert$/i.test(addr)) {
+      yAxis = 6;
+      step = true;
+    } else {
+      tryDetectType = parts.slice(0, 5).join(".") + ".Intern.Typ";
+    }
+  }
+  // Tagesprogramm:
+  else if (isTagesprogrammAddress(addr)) {
+    group = groupOverride || "Tagesprogramm";
+    let tpName = parts[4] || "";
+    name = String(tpName).replace(/_/g, " ").replace(/zu/g, "->");
+  }
+
+  const visible =
+    q.Variable && addr.indexOf(normalizeAddress(q.Variable)) !== -1
+      ? true
+      : typeof visibleOverride === "boolean"
+      ? visibleOverride
+      : false;
+
+  return {
+    address: addr,
+    name: name,
+    group: group,
+    subgroup: subgroup,
+    yAxis: yAxis,
+    step: step,
+    visible: visible,
+    tryDetectType: tryDetectType,
+    plant: "Anlage"
+  };
+}
+
+function defsFromConfig(cfg) {
+  const defs = [];
+  if (!cfg || !Array.isArray(cfg.groups)) return defs;
+
+  cfg.groups.forEach(function (g) {
+    const gName = g && g.name ? String(g.name) : "Ungruppiert";
+    const vars = Array.isArray(g && g.variables) ? g.variables : [];
+    vars.forEach(function (v) {
+      if (!v || !v.address) return;
+      defs.push(makeSeriesDefFromAddress(v.address, gName, !!v.visible));
+    });
+  });
+
+  return defs;
+}
+
+// ============================================================
+// 4) AGGREGATION: RAW < 1 Woche, sonst 10m Average
+//    - Tagesprogramm: RAW
+//    - Status/Zustand: RAW
+// ============================================================
+function getAggregationSimple(from, to, address) {
+  address = normalizeAddress(address);
+
+  const diff = to - from;
+  const weekMs = 7 * 24 * 3600 * 1000;
+
+  if (isTagesprogrammAddress(address)) return { agg: null, int: null, unit: null, cat: "raw" };
+  if (/\.Zustand$|\.Status$/i.test(address)) return { agg: null, int: null, unit: null, cat: "raw" };
+  if (diff < weekMs) return { agg: null, int: null, unit: null, cat: "raw" };
+
+  return { agg: "Average", int: "10", unit: "m", cat: "10m" };
+}
+
+// ============================================================
+// 5) FETCH DATA (NEU!)
+// - Hauptserie: NUR echte Punkte (Tooltips immer korrekt)
+// - Pad-Serie: Fallback-Linien OHNE Tooltip (Rand/NoData/Current)
+// ============================================================
+function fetchData(series, from, to) {
+  if (!series || (series.options && series.options.isPadSeries)) return;
+
+  let address = series.options && series.options.address;
+  if (!address) return;
+
+  address = normalizeAddress(address);
+
+  const padSeries = getPadSeriesFor(series);
+
+  const manualType = series.options && series.options.dataType;
+  const forcedState = manualType === "status";
+  const forcedTP = manualType === "tagesprogramm";
+  const isState = forcedState || /\.Zustand$|\.Status$/i.test(address);
+  const isTP = forcedTP || isTagesprogrammAddress(address);
+
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
+
+  const weekMs = 7 * 24 * 3600 * 1000;
+  const lookMs = 4 * weekMs;
+  const bfFromMs = Math.max(0, fromMs - lookMs);
+  const ffToMs = toMs + lookMs;
+
+  function qf(filter, cb) {
+    webMI.data.queryFilter(filter, function (res) { cb(res); });
+  }
+
+  function buildMainFilter() {
+    const filter = {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + fromMs + "<=" + toMs]
+    };
+
+    if (!isState && !isTP) {
+      const agg = getAggregationSimple(from, to, address);
+      if (agg && agg.agg) {
+        filter.aggregate = ["v:" + agg.agg];
+        filter.interval = ["v:" + agg.int];
+        filter.unit = ["v:" + agg.unit];
+      }
+    }
+
+    return filter;
+  }
+
+  function buildBackfillFilter() {
+    return {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + bfFromMs + "<=" + fromMs]
+    };
+  }
+
+  function buildForwardFilter() {
+    return {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + toMs + "<=" + ffToMs]
+    };
+  }
+
+  function applyMainData(pointsXY) {
+    series.setData(pointsXY, true);
+    series.options.loaded = true;
+    series.options.from = fromMs;
+    series.options.to = toMs;
+    console.log("[Trend] " + (series.name || "?") + " -> " + pointsXY.length + " echte Werte (" + address + ")");
+  }
+
+  function applyPadData(pointsXY) {
+    if (!padSeries) return;
+    padSeries.setData(pointsXY, true);
+  }
+
+  function clearPad() {
+    applyPadData([]);
+  }
+
+  function nowIsInsideRange() {
+    const now = Date.now();
+    return now >= fromMs && now <= toMs;
+  }
+
+  function drawPadFlat(y) {
+    applyPadData([[fromMs, y], [toMs, y]]);
+  }
+
+  function drawPadLeftExtension(leftY, firstRealPoint) {
+    if (!firstRealPoint) return;
+    const firstTs = firstRealPoint[0];
+    const firstY = firstRealPoint[1];
+    if (firstTs <= fromMs) return;
+    applyPadData([[fromMs, leftY], [firstTs, firstY]]);
+  }
+
+  function drawPadRightExtension(lastRealPoint, rightY) {
+    if (!lastRealPoint) return;
+    const lastTs = lastRealPoint[0];
+    const lastY = lastRealPoint[1];
+    if (lastTs >= toMs) return;
+    applyPadData([[lastTs, lastY], [toMs, rightY]]);
+  }
+
+  qf(buildMainFilter(), function (mainRes) {
+    const mainData = normalizeResultToXY(mainRes);
+
+    // Standard: Pad leer
+    clearPad();
+
+    // A) echte Daten im Fenster
+    if (mainData.length > 0) {
+      applyMainData(mainData);
+
+      const first = mainData[0];
+      const last = mainData[mainData.length - 1];
+
+      const needLeft = first[0] > fromMs;
+      const needRight = last[0] < toMs;
+
+      // Links: wenn erster echter Punkt später kommt -> Pad-Linie (ohne Tooltip)
+      if (needLeft) {
+        qf(buildBackfillFilter(), function (bfRes) {
+          const bfData = normalizeResultToXY(bfRes);
+          const lastBefore = bfData.length ? bfData[bfData.length - 1] : null;
+
+          if (lastBefore) {
+            drawPadLeftExtension(lastBefore[1], first);
+          } else {
+            // KEIN Wert davor: wir dürfen NICHT in Hauptserie erfinden.
+            // Pad darf optional first-Wert bis zum ersten Punkt halten (ohne Tooltip).
+            // Wenn du das NICHT willst: diese Zeile entfernen.
+            drawPadLeftExtension(first[1], first);
+          }
+        });
+      }
+
+      // Rechts: wenn letzter echter Punkt früher endet -> Pad-Linie (ohne Tooltip)
+      if (needRight) {
+        qf(buildForwardFilter(), function (ffRes) {
+          const ffData = normalizeResultToXY(ffRes);
+          const firstAfter = ffData.length ? ffData[0] : null;
+
+          if (firstAfter) {
+            drawPadRightExtension(last, firstAfter[1]);
+          } else {
+            drawPadRightExtension(last, last[1]);
+          }
+        });
+      }
+
+      return;
+    }
+
+    // B) keine echten Daten im Fenster -> Hauptserie leer
+    applyMainData([]);
+
+    // Pad-Linie nur als Visual-Fallback
+    qf(buildBackfillFilter(), function (bfRes2) {
+      const bfData2 = normalizeResultToXY(bfRes2);
+      const lastBefore2 = bfData2.length ? bfData2[bfData2.length - 1] : null;
+
+      qf(buildForwardFilter(), function (ffRes2) {
+        const ffData2 = normalizeResultToXY(ffRes2);
+        const firstAfter2 = ffData2.length ? ffData2[0] : null;
+
+        if (lastBefore2 && firstAfter2) {
+          // einfache Linie über den Zeitraum (ohne Tooltip)
+          applyPadData([[fromMs, lastBefore2[1]], [toMs, firstAfter2[1]]]);
+          return;
+        }
+        if (lastBefore2) { drawPadFlat(lastBefore2[1]); return; }
+        if (firstAfter2) { drawPadFlat(firstAfter2[1]); return; }
+
+        // C) gar nichts gefunden -> optional Current-Value Linie, aber NUR als Pad (ohne Tooltip)
+        if (nowIsInsideRange()) {
+          webMI.data.read(address, function (e) {
+            const v = e && e.value != null ? e.value : null;
+            const cur = parseAnyNumber(v);
+            if (isNaN(cur)) { clearPad(); return; }
+            drawPadFlat(cur);
+          });
+          return;
+        }
+
+        clearPad();
+      });
+    });
+  });
+}
+
+// ============================================================
+// 6) Y-ACHSE (FIX)
+// ============================================================
+function updateYAxisRangesAndRedraw() {
+  if (!chart) return;
+
+  const yUsed = new Set();
+  chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return; // Pad ignorieren
+    if (s.visible) yUsed.add(s.options.yAxis);
+  });
+
+  const yAxisRanges = {
+    0: { min: 0, title: "T{Wert}" },
+    1: { min: 0, max: 60, title: "T{Zustand}" },
+    2: { min: 0, max: 500, title: "T{Füllstand} m³" },
+    3: { min: -10, max: 10, title: "T{Druck} mBar" },
+    4: { min: 0, max: 100, title: "T{Durchfluss} m/h" },
+    5: { min: -50, max: 50, title: "T{Temperatur} °C" },
+    6: { min: 0, max: 100, title: "T{Aktiver Istwert} %" }
+  };
+
+  chart.yAxis.forEach(function (axis, idx) {
+    const use = yUsed.has(idx);
+    const cfg = use ? yAxisRanges[idx] : { min: null, max: null, title: "" };
+    axis.update({ min: cfg.min, max: cfg.max, title: { text: cfg.title } }, false);
+  });
+
+  chart.redraw();
+}
+
+// ============================================================
+// 7) RELOAD VISIBLE (Range aus Inputs)
+// ============================================================
+function reloadVisible() {
+  if (!chart) return;
+
+  const tr = getTimeRange();
+  const fromMs = tr.from.getTime();
+  const toMs = tr.to.getTime();
+
+  suppressAfterSetExtremes = true;
+  chart.xAxis[0].setExtremes(fromMs, toMs, true, false, { trigger: "internal" });
+  suppressAfterSetExtremes = false;
+
+  chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return;
+    if (!s.visible) return;
+    fetchData(s, tr.from, tr.to);
+  });
+
+  updateYAxisRangesAndRedraw();
+}
+
+// ============================================================
+// 8) SERIEN AUFBAU + LEGENDE + Sortierung per SortOrder
+// ============================================================
+function addDiscoveredSeries(addressDefs, opts) {
+  const afterAddSave = opts && typeof opts.afterAddSave === "boolean" ? opts.afterAddSave : false;
+  let pendingTypeReads = 0;
+
+  while (chart.series.length) chart.series[0].remove(false);
+
+  // Manual defs
+  manualDefinitions.forEach(function (def) {
+    if (!def || !def.address) return;
+
+    const addr = normalizeAddress(def.address);
+    const isStatus = def.dataType === "status" || /\.Zustand$|\.Status$/i.test(addr);
+
+    addSeriesWithPad({
+      name: def.name || def.group || addr,
+      address: addr,
+      visible: !!def.visible,
+      type: "line",
+      yAxis: (typeof def.yAxis === "number") ? def.yAxis : (isStatus ? 1 : 0),
+      group: def.group || "Allgemein",
+      subgroup: def.subgroup || null,
+      step: isStatus ? "left" : (def.step ? "left" : undefined),
+      dataType: def.dataType || "value",
+      plant: "Anlage"
+    });
+  });
+
+  // Auto defs
+  addressDefs.forEach(function (def) {
+    const isStateAddr = /\.Zustand$|\.Status$/i.test(def.address);
+
+    if (!isStateAddr && def.tryDetectType) {
+      pendingTypeReads++;
+      webMI.data.read(def.tryDetectType, function (e) {
+        const typ = e && e.value ? e.value.de : null;
+        let yIdx = def.yAxis != null ? def.yAxis : 0;
+
+        switch (typ) {
+          case "Auslastung": yIdx = 0; break;
+          case "Füllstandsmessung": yIdx = 2; break;
+          case "Druckmessung": yIdx = 3; break;
+          case "Durchflussmessung": yIdx = 4; break;
+          case "Temperaturmessung": yIdx = 5; break;
+          case "Gasleck- Sensor": yIdx = 0; break;
+        }
+
+        addSeriesWithPad({
+          name: def.name,
+          address: normalizeAddress(def.address),
+          visible: !!def.visible,
+          type: "line",
+          yAxis: yIdx,
+          group: def.group,
+          subgroup: def.subgroup || null,
+          step: def.step ? "left" : undefined,
+          plant: "Anlage"
+        });
+
+        pendingTypeReads--;
+        if (pendingTypeReads === 0) finalizeAdd();
+      });
+    } else {
+      addSeriesWithPad({
+        name: def.name,
+        address: normalizeAddress(def.address),
+        visible: !!def.visible,
+        type: "line",
+        yAxis: def.yAxis != null ? def.yAxis : (isStateAddr ? 1 : 0),
+        group: def.group,
+        subgroup: def.subgroup || null,
+        step: def.step ? "left" : undefined,
+        plant: "Anlage"
+      });
+    }
+  });
+
+  if (pendingTypeReads === 0) finalizeAdd();
+
+  function finalizeAdd() {
+    chart.redraw();
+    buildLegend();
+
+    const tr = getTimeRange();
+
+    chart.series.forEach(function (s) {
+      if (s.options && s.options.isPadSeries) return;
+      if (s.visible && !s.options.loaded) fetchData(s, tr.from, tr.to);
+    });
+
+    suppressAfterSetExtremes = true;
+    chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+    suppressAfterSetExtremes = false;
+
+    updateYAxisRangesAndRedraw();
+
+    if (afterAddSave) saveCurrentConfig();
+  }
+}
+
+function buildLegend() {
+  const container = document.getElementById("html-tree");
+  if (!container || !chart) return;
+
+  container.innerHTML = "";
+
+  // groups[group][sub] = series[]
+  const groups = {};
+  chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return; // Pad NICHT in Legende aufnehmen
+
+    const g = (s.options && s.options.group) ? s.options.group : "Ungruppiert";
+    const sub = (s.options && s.options.subgroup) ? s.options.subgroup : null;
+
+    if (!groups[g]) groups[g] = {};
+    if (!groups[g][sub]) groups[g][sub] = [];
+    groups[g][sub].push(s);
+  });
+
+  function getSortIndex(name) {
+    if (!Array.isArray(sortList) || !sortList.length) return -1;
+    for (let i = 0; i < sortList.length; i++) {
+      const item = sortList[i];
+      if (!item) continue;
+      if (item["1"] === name) return i;
+      if (item[1] === name) return i;
+      if (item.name === name) return i;
+      const vals = Object.values(item);
+      if (vals && vals.length && vals[0] === name) return i;
+    }
+    return -1;
+  }
+
+  const allGroupNames = Object.keys(groups);
+  const hasAllgemein = allGroupNames.indexOf("Allgemein") !== -1;
+  const hasTagesprogramm = allGroupNames.indexOf("Tagesprogramm") !== -1;
+
+  const middle = allGroupNames.filter(function (g) {
+    if (g === "Allgemein") return false;
+    if (g === "Tagesprogramm") return false;
+    return true;
+  });
+
+  middle.sort(function (a, b) {
+    const ia = getSortIndex(a);
+    const ib = getSortIndex(b);
+
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  const groupNames = [];
+  if (hasAllgemein) groupNames.push("Allgemein");
+  groupNames.push.apply(groupNames, middle);
+  if (hasTagesprogramm) groupNames.push("Tagesprogramm");
+
+  groupNames.forEach(function (gName, idx) {
+    if (idx > 0) {
+      const hr = top.document.createElement("hr");
+      hr.style.border = "0";
+      hr.style.borderTop = "1px solid #444";
+      hr.style.margin = "10px 0";
+      container.appendChild(hr);
+    }
+
+    const header = top.document.createElement("div");
+    header.style.fontWeight = "bold";
+    header.style.marginTop = "10px";
+    header.style.cursor = "pointer";
+    header.style.fontSize = "13px";
+
+    const displayName = String(gName).replace(/_/g, " ");
+
+    try {
+      webMI.data.call(
+        "Standard_elpo",
+        { Funktion: "Translate", Text: displayName, Sprache: language },
+        function (resp) { header.textContent = resp && resp.result ? resp.result : displayName; }
+      );
+    } catch (e) {
+      header.textContent = displayName;
+    }
+
+    container.appendChild(header);
+
+    const body = top.document.createElement("div");
+    body.style.marginLeft = "8px";
+    body.style.display = "none";
+    container.appendChild(body);
+
+    const hasVisible = Object.values(groups[gName]).some(function (arr) {
+      return arr.some(function (s) { return s.visible; });
+    });
+    if (hasVisible) body.style.display = "block";
+
+    header.addEventListener("click", function () {
+      body.style.display = body.style.display === "none" ? "block" : "none";
+    });
+
+    const subgroups = groups[gName];
+    const sortedSubs = Object.keys(subgroups).sort(function (a, b) {
+      if (a === "null") return -1;
+      if (b === "null") return 1;
+      return String(a).localeCompare(String(b));
+    });
+
+    sortedSubs.forEach(function (sub) {
+      let targetContainer = body;
+
+      if (sub && sub !== "null") {
+        const subHeader = top.document.createElement("div");
+        subHeader.style.fontStyle = "italic";
+        subHeader.style.marginLeft = "8px";
+        subHeader.style.cursor = "pointer";
+        subHeader.style.fontWeight = "bold";
+        subHeader.style.marginTop = "4px";
+        subHeader.style.fontSize = "12px";
+        subHeader.textContent = sub;
+
+        const subBody = top.document.createElement("div");
+        subBody.style.marginLeft = "8px";
+        subBody.style.display = "none";
+
+        subHeader.addEventListener("click", function (e) {
+          e.stopPropagation();
+          subBody.style.display = subBody.style.display === "none" ? "block" : "none";
+        });
+
+        body.appendChild(subHeader);
+        body.appendChild(subBody);
+        targetContainer = subBody;
+      }
+
+      const seriesList = subgroups[sub];
+      seriesList
+        .sort(function (a, b) { return a.name.localeCompare(b.name); })
+        .forEach(function (s) {
+          const row = top.document.createElement("div");
+          row.textContent = s.name;
+          row.style.cursor = "pointer";
+          row.style.padding = "2px 8px";
+          row.style.marginLeft = "8px";
+          row.style.color = s.visible ? s.color : "#666";
+          row.style.fontWeight = s.visible ? "bold" : "normal";
+
+          row.addEventListener("click", function (e) {
+            e.stopPropagation();
+
+            const show = !s.visible;
+
+            // Hauptserie toggeln
+            s.setVisible(show, false);
+
+            // Pad-Serie synchron toggeln
+            const pad = getPadSeriesFor(s);
+            if (pad) {
+              pad.setVisible(show, false);
+              if (!show) pad.setData([], false);
+            }
+
+            row.style.fontWeight = show ? "bold" : "normal";
+            row.style.color = show ? s.color : "#666";
+
+            const tr = getTimeRange();
+            if (show) fetchData(s, tr.from, tr.to);
+
+            suppressAfterSetExtremes = true;
+            chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+            suppressAfterSetExtremes = false;
+
+            updateYAxisRangesAndRedraw();
+          });
+
+          targetContainer.appendChild(row);
+        });
+    });
+  });
+}
+
+// ============================================================
+// 9) CONFIG speichern
+// ============================================================
+function saveCurrentConfig() {
+  if (!chart) return;
+
+  const manualAddrSet = new Set(
+    manualDefinitions
+      .map(function (d) { return d && normalizeAddress(d.address); })
+      .filter(function (a) { return typeof a === "string"; })
+  );
+
+  const cfg = { reload: true, source: "config", groups: [] };
+  const grouped = {};
+
+  chart.series.forEach(function (s) {
+    const opts = s.options || {};
+    if (opts.isPadSeries) return; // Pad nicht speichern
+
+    const addr = normalizeAddress(opts.address);
+    if (!addr) return;
+    if (manualAddrSet.has(addr)) return;
+
+    const g = opts.group || "Ungruppiert";
+    if (!grouped[g]) grouped[g] = [];
+    grouped[g].push({ address: addr, visible: s.visible });
+  });
+
+  Object.keys(grouped).forEach(function (groupName) {
+    cfg.groups.push({ name: groupName, variables: grouped[groupName] });
+  });
+
+  webMI.data.write(configAddr, JSON.stringify(cfg), function () {});
+}
+
+// ============================================================
+// 10) CONFIG/BROWSE LADEN (Single-Plant)
+// ============================================================
+function loadFromConfigOrBrowse() {
+  webMI.data.read(configAddr, function (ce) {
+    const cfgRaw = ce && ce.value ? ce.value : null;
+    const cfg = parseConfig(cfgRaw);
+
+    const cfgDefs = defsFromConfig(cfg);
+    const configIsEmpty = cfgDefs.length === 0;
+
+    if (!configIsEmpty) {
+      addDiscoveredSeries(cfgDefs, { afterAddSave: false });
+      return;
+    }
+
+    if (!browseAll) {
+      addDiscoveredSeries([], { afterAddSave: false });
+      return;
+    }
+
+    const allAddrs = [];
+
+    webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS.Anlage" }, function (treeAnlage) {
+      allAddrs.push.apply(allAddrs, collectAnlageIOs(treeAnlage));
+
+      webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS.System.Tagesprogramm" }, function (treeTP) {
+        allAddrs.push.apply(allAddrs, collectTagesprogramm(treeTP));
+
+        const defs = allAddrs.map(function (addr) { return makeSeriesDefFromAddress(addr); });
+        addDiscoveredSeries(defs, { afterAddSave: true });
+      });
+    });
+  });
+}
+
+// ============================================================
+// 11) CHART (Standard Highcharts Zoom/Reset)
+// ============================================================
+function drawChart() {
+  chart = top.Highcharts.chart(document.getElementById("container"), {
+    chart: {
+      style: { fontSize: "11px" },
+      events: {
+        load: function () {
+          loadFromConfigOrBrowse();
+        }
+      }
+    },
+
+    title: { text: "", useHTML: true },
+    time: { useUTC: false },
+    legend: { enabled: false },
+
+    xAxis: {
+      type: "datetime",
+      events: {
+        afterSetExtremes: function (e) {
+          if (suppressAfterSetExtremes) return;
+          if (!e || typeof e.min !== "number" || typeof e.max !== "number") return;
+
+          setTimeRangeInputs(e.min, e.max);
+
+          const from = new Date(e.min);
+          const to = new Date(e.max);
+
+          chart.series.forEach(function (s) {
+            if (s.options && s.options.isPadSeries) return;
+            if (!s.visible) return;
+            fetchData(s, from, to);
+          });
+
+          updateYAxisRangesAndRedraw();
+        }
+      }
+    },
+
+    yAxis: Array.from({ length: 7 }, function (_, i) {
+      return { title: { text: "" }, opposite: i === 1 };
+    }),
+
+    plotOptions: {
+      series: {
+        label: { enabled: true, connectorAllowed: false, style: { fontSize: "14px" } },
+        marker: { enabled: false }
+      }
+    },
+
+    tooltip: {
+      shared: true,
+      useHTML: true,
+      xDateFormat: "%d.%m.%Y %H:%M:%S",
+      pointFormat:
+        '<span style="color:{series.color}">●</span> <b>{series.name}</b>: {point.y:.2f}<br/>',
+      style: { fontSize: "14px" }
+    },
+
+    exporting: {
+      enabled: true,
+      chartOptions: { chart: { backgroundColor: "#ffffff" } },
+      showTable: false,
+      menuItemDefinitions: { viewData: null, viewFullscreen: null },
+      url: null,
+      fallbackToExportServer: false,
+      sourceWidth: 1700,
+      sourceHeight: 940
+    },
+
+    series: []
+  });
+
+  // initial extremes aus Inputs
+  const tr = getTimeRange();
+
+  suppressAfterSetExtremes = true;
+  chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+  suppressAfterSetExtremes = false;
+
+  updateYAxisRangesAndRedraw();
+}
+
+// ============================================================
+// 12) SORT LADEN (Single-Plant)
+// ============================================================
+function loadSortThenStart() {
+  function start() {
+    drawChart();
+    wireButtons();
+  }
+
+  if (!q.SortierVariable) {
+    sortList = null;
+    start();
+    return;
+  }
+
+  webMI.data.read(q.SortierVariable, function (e) {
+    const raw = e && e.value != null ? e.value : null;
+    const parsed = parseMaybeJson(raw);
+
+    if (Array.isArray(parsed)) { sortList = parsed; start(); return; }
+
+    if (typeof raw === "string") {
+      const p2 = parseMaybeJson(raw);
+      if (Array.isArray(p2)) { sortList = p2; start(); return; }
+    }
+
+    sortList = null;
+    start();
+  });
+}
+
+// ============================================================
+// 13) BUTTONS (Load + Live + ←/→)
+// ============================================================
+function updateHistoryButtonsEnabled() {
+  const backBtn = document.getElementById("backBtn");
+  const forwardBtn = document.getElementById("forwardBtn");
+  if (!backBtn || !forwardBtn) return;
+
+  backBtn.disabled = !!liveMode;
+  forwardBtn.disabled = !!liveMode;
+
+  backBtn.style.opacity = liveMode ? "0.4" : "1";
+  forwardBtn.style.opacity = liveMode ? "0.4" : "1";
+  backBtn.style.cursor = liveMode ? "not-allowed" : "pointer";
+  forwardBtn.style.cursor = liveMode ? "not-allowed" : "pointer";
+}
+
+function shiftHistory(direction) {
+  if (liveMode) return;
+
+  const tr = getTimeRange();
+  const fromMs = tr.from.getTime();
+  const toMs = tr.to.getTime();
+  const span = toMs - fromMs;
+
+  if (!isFinite(span) || span <= 0) return;
+
+  let newFrom = fromMs;
+  let newTo = toMs;
+
+  if (direction === "back") {
+    newFrom = fromMs - span;
+    newTo = toMs - span;
+  } else if (direction === "forward") {
+    const now = Date.now();
+    newTo = Math.min(now, toMs + span);
+    newFrom = newTo - span;
+  }
+
+  setTimeRangeInputs(newFrom, newTo);
+  reloadVisible();
+}
+
+function wireButtons() {
+  const loadBtn = document.getElementById("loadBtn");
+  if (loadBtn) {
+    loadBtn.addEventListener("click", function () {
+      reloadVisible();
+    });
+  }
+
+  const backBtn = document.getElementById("backBtn");
+  if (backBtn) backBtn.addEventListener("click", function () { shiftHistory("back"); });
+
+  const forwardBtn = document.getElementById("forwardBtn");
+  if (forwardBtn) forwardBtn.addEventListener("click", function () { shiftHistory("forward"); });
+
+  const liveBtn = document.getElementById("liveBtn");
+  if (!liveBtn) return;
+
+  updateHistoryButtonsEnabled();
+
+  liveBtn.addEventListener("click", function () {
+    liveMode = !liveMode;
+
+    const fromEl = document.getElementById("startTime");
+    const toEl = document.getElementById("endTime");
+
+    if (fromEl) fromEl.readOnly = liveMode;
+    if (toEl) toEl.readOnly = liveMode;
+
+    liveBtn.textContent = liveMode ? "T{Live}" : "T{Historie}";
+
+    updateHistoryButtonsEnabled();
+
+    if (liveMode) {
+      if (liveTimer) clearInterval(liveTimer);
+
+      const tr = getTimeRange();
+      const diff = tr.to - tr.from;
+      if (!isNaN(diff) && diff > 30 * 1000) liveWindowMs = diff;
+      else liveWindowMs = 3600 * 1000;
+
+      const tick = function () {
+        const now2 = new Date();
+        const from2 = new Date(now2.getTime() - liveWindowMs);
+
+        if (fromEl) fromEl.value = toLocalDatetimeString(from2);
+        if (toEl) toEl.value = toLocalDatetimeString(now2);
+
+        reloadVisible();
+      };
+
+      tick();
+      liveTimer = setInterval(tick, 5000);
+    } else {
+      if (liveTimer) clearInterval(liveTimer);
+      liveTimer = null;
+    }
+  });
+}
+
+// ============================================================
+// 14) START
+// ============================================================
+webMI.libraryLoader.load(
+  [
+    "highcharts/highcharts.js",
+    "highcharts/modules/exporting.js",
+    "highcharts/modules/export-data.js",
+    "highcharts/modules/offline-exporting.js",
+    "highcharts/modules/series-label.js",
+    "highcharts/modules/datagrouping.js",
+    "highcharts/themes/grid-light.js"
+  ],
+  [],
+  function () {
+    webMI.addOnload(function () {
+      language = top.language;
+
+      const now = new Date();
+      const past = new Date(now.getTime() - (parseInt(q.Zeitbereich) || 24 * 3600 * 1000));
+
+      const startEl = document.getElementById("startTime");
+      const endEl = document.getElementById("endTime");
+      if (startEl) startEl.value = toLocalDatetimeString(past);
+      if (endEl) endEl.value = toLocalDatetimeString(now);
+
+      loadSortThenStart();
+    });
+  }
+);
