@@ -1,42 +1,407 @@
-const manualDefinitions = [
-];
+<?xml version='1.0' encoding='UTF-8'?>
+<svg height="940" version="1.2" width="1660" xmlns="http://www.w3.org/2000/svg" xmlns:atv="http://webmi.atvise.com/2007/svgext" xmlns:xlink="http://www.w3.org/1999/xlink">
+ <defs/>
+ <metadata>
+  <atv:parameter behavior="optional" defaultvalue="AGENT.DISPLAYS.MAIN.Anlage.SortOrder" desc="Single (Legacy) SortOrder; bei Multi wird pro Plant fest verdrahtet" name="SortierVariable" valuetype="address"/>
+  <atv:parameter behavior="mandatory" defaultvalue="86400000" desc="Standardzeitbereich in ms" name="Zeitbereich" valuetype="number"/>
+  <atv:parameter behavior="optional" name="Variable" valuetype="address"/>
+  <atv:parameter behavior="optional" defaultvalue="Biometano" desc="Plant-Mode: leer/ALL = Multi (Biometano/Belagreen/BBO), sonst Single (z.B. Biometano)" name="Plant" valuetype="string"/>
+  <atv:gridconfig enabled="false" gridstyle="lines" height="20" width="20"/>
+  <atv:snapconfig enabled="false" height="10" width="10"/>
+ </metadata>
+ <foreignObject height="940px" id="id_0" width="1660px" x="0" y="0">
+  <div style="width:100%; height:100%; display:flex; font-family:Segoe UI, sans-serif; box-sizing:border-box;" xmlns="http://www.w3.org/1999/xhtml">
+   <!-- Chart & Controls -->
+   <div style="flex-grow:1; display:flex; flex-direction:column; padding:10px; box-sizing:border-box; min-height:0;">
+    <div style="display:flex; gap:10px; margin-bottom:10px; align-items:flex-end; background:#f4f4f4; padding:10px; border-radius:8px; box-shadow:0 0 4px rgba(0,0,0,0.1);">
+     <div style="display:flex; flex-direction:column;">
+      <label style="font-size:12px; margin-bottom:2px;">T{Von}:</label>
+      <input id="startTime" max="2199-12-31T23:59" min="2000-01-01T00:00" oninput="this.setCustomValidity(''); if(this.validity.rangeOverflow || this.validity.rangeUnderflow){this.setCustomValidity('Datum muss zwischen 2000 und 2099 liegen.');}" style="padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px; min-width:140px;" type="datetime-local"/>
+     </div>
+     <div style="display:flex; flex-direction:column;">
+      <label style="font-size:12px; margin-bottom:2px;">T{Bis}:</label>
+      <input id="endTime" max="2199-12-31T23:59" min="2000-01-01T00:00" oninput="this.setCustomValidity(''); if(this.validity.rangeOverflow || this.validity.rangeUnderflow){this.setCustomValidity('Datum muss zwischen 2000 und 2099 liegen.');}" style="padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px; min-width:140px;" type="datetime-local"/>
+     </div>
+     <button id="shiftLeftBtn" style="padding:8px 10px; border:none; background:#444; color:white; border-radius:4px; cursor:pointer; font-size:14px;">
+  ◀
+</button>
+     <button id="shiftRightBtn" style="padding:8px 10px; border:none; background:#444; color:white; border-radius:4px; cursor:pointer; font-size:14px;">
+  ▶
+</button>
+     <button id="loadBtn" style="padding:8px 10px; border:none; background:#276ef1; color:white; border-radius:4px; cursor:pointer; font-size:14px;">
+            ↻ T{Laden}
+          </button>
+     <button id="liveBtn" style="padding:8px 10px; border:none; background:#777; color:white; border-radius:4px; cursor:pointer; font-size:14px;">
+            T{Historie}
+          </button>
+    </div>
+    <div id="container" style="flex-grow:1; width:100%; min-height:0; overflow:hidden;"/>
+   </div>
+   <!-- Sidebar rechts -->
+   <div id="html-tree" style="width:250px; padding:10px; overflow:auto; font-size:13px; box-sizing:border-box;"/>
+  </div>
+ </foreignObject>
+ <script atv:desc="" atv:name="" type="text/ecmascript"><![CDATA[
+// ============================================================
+// 20260129 - 4  Multi-Plant Highcharts (Standard-Zoom + Pad-Linie ohne Tooltip)
+// READY TO PASTE
+//
+// Ziele:
+// - Tooltips/Timestamps dürfen NIEMALS für erfundene Punkte erscheinen.
+// - Jede echte Serie bekommt eine 2. "Pad"-Serie (linkedTo) die:
+//     enableMouseTracking:false  => kein Tooltip, kein Timestamp
+//     showInLegend:false         => taucht nicht in Legende auf
+// - Hauptserie enthält NUR echte Archivpunkte
+// - Pad-Serie zeichnet nur Fallback-Linien (Rand/NoData/Current) OHNE Tooltip
+//
+// Multi-Plant:
+// - q.Plant leer/ALL => Multi (Biometano/Belagreen/BBO)
+// - q.Plant gesetzt  => Single (neues Schema: AGENT.OBJECTS.<Plant>....)
+// - Legacy Single bleibt kompatibel (AGENT.OBJECTS.Anlage....)
+// ============================================================
+
 
 // ============================================================
-// 20260129 - 3  Single-Plant Highcharts
-// - Zoom per Mausbereich (drag) + stabiler Reset-Zoom (ohne Drift)
-// - NoData-Fallback (±4 Wochen Randpunkte + Current-Value Linie)
-// - Aggregation: RAW < 1 Woche, sonst 10m Average (Tagesprogramm/Status/Zustand immer RAW)
-// - Sortierung der Gruppen per q.SortierVariable (Array wie bei dir: [{1:"Fermenter_F1"}, ...])
+// 0) KONFIG (Multi/Single)
 // ============================================================
+
+const manualDefinitions = [
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "T{BHKW}",
+    address:
+      "AGENT.OBJECTS.Biometano.Anlage.Fackel_BHKW_Upgrading.Schnittstelle_BHKW.Leistung_BHKW_zu_BGA",
+    name: "T{Leistung BHKW}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "T{Biogas}",
+    address:
+      "AGENT.OBJECTS.Biometano.Anlage.Fackel_BHKW_Upgrading.Parameter.Steuerung_Fackel.Gesamt_Fuellstand",
+    name: "T{Gesamt Gasfüllstand}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Spannung_L1_L2",
+    name: "T{Spannung L1-L2}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Spannung_L2_L3",
+    name: "T{Spannung L2-L3}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Spannung_L3_L1",
+    name: "T{Spannung L3-L1}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Strom_L1",
+    name: "T{Strom L1}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Strom_L2",
+    name: "T{Strom L2}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Strom_L3",
+    name: "T{Strom L3}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR1",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Gesamtwirkleistung",
+    name: "T{Gesamtwirkleistung}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Spannung_L1_L2",
+    name: "T{Spannung L1-L2}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Spannung_L2_L3",
+    name: "T{Spannung L2-L3}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Spannung_L3_L1",
+    name: "T{Spannung L3-L1}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Strom_L1",
+    name: "T{Strom L1}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Strom_L2",
+    name: "T{Strom L2}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Strom_L3",
+    name: "T{Strom L3}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "CR2",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Gesamtwirkleistung",
+    name: "T{Gesamtwirkleistung}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Spannung_L1_L2",
+    name: "T{Spannung L1-L2}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Spannung_L2_L3",
+    name: "T{Spannung L2-L3}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Spannung_L3_L1",
+    name: "T{Spannung L3-L1}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Strom_L1",
+    name: "T{Strom L1}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Strom_L2",
+    name: "T{Strom L2}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Strom_L3",
+    name: "T{Strom L3}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+  {
+    plant: "Biometano",
+    group: "Allgemein",
+    subgroup: "HV",
+    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Gesamtwirkleistung",
+    name: "T{Gesamtwirkleistung}",
+    yAxis: 0,
+    step: false,
+    visible: false,
+    dataType: "value",
+    Archiv: "Archiv",
+  },
+];
 
 let chart;
 let liveMode = false;
 let liveTimer = null;
 let language = null;
 
-// SortOrder (Array) oder null
-let sortList = null;
+let fetchTokenCounter = 0;
+
+// SortOrder
+let sortMap = {};     // { Biometano: <raw>, Belagreen: <raw>, BBO: <raw>, <singlePlant>: <raw> }
+let sortList = null;  // Legacy fallback (q.SortierVariable)
 
 // Rolling-Window im Live-Modus (Default 1h)
 let liveWindowMs = 3600 * 1000;
 
 const q = webMI.query;
 
-// Config
-const browseAll = true;
-const configAddr = "AGENT.OBJECTS.System.Diagramm.Konfiguriert";
+// Plant Mode
+const requestedPlant = (typeof q.Plant === "string") ? q.Plant.trim() : "";
+const isMultiPlant = (!requestedPlant || requestedPlant.toUpperCase() === "ALL");
+const defaultPlants = ["Biometano", "Belagreen", "BBO"];
+const singlePlant = isMultiPlant ? "" : requestedPlant;
+
+// Browse & Config
+const browseAll = false;
+
+// Multi: global | Single (neues Schema): pro Plant | Legacy: global
+const configAddr = isMultiPlant
+  ? "AGENT.OBJECTS.System.Diagramm.Konfiguriert"
+  : (singlePlant
+      ? ("AGENT.OBJECTS." + singlePlant + ".System.Diagramm.Konfiguriert")
+      : "AGENT.OBJECTS.System.Diagramm.Konfiguriert"
+    );
+
+// SortOrder pro Plant (Multi)
+const sortVarsMulti = {
+  Biometano: "AGENT.DISPLAYS.MAIN.Biometano.Anlage.SortOrder",
+  Belagreen: "AGENT.DISPLAYS.MAIN.Belagreen.Anlage.SortOrder",
+  BBO: "AGENT.DISPLAYS.MAIN.BBO.Anlage.SortOrder"
+};
+
+// Single (neues Schema) Standard-SortOrder
+const sortVarsSingleDefault = singlePlant
+  ? ("AGENT.DISPLAYS.MAIN." + singlePlant + ".Anlage.SortOrder")
+  : "";
+
+// Wenn q.SortierVariable gesetzt ist, hat das Vorrang (Single-Fall)
+const sortVarSingle = q.SortierVariable ? q.SortierVariable : sortVarsSingleDefault;
 
 // Intern
 let suppressAfterSetExtremes = false;
 
-// Zoom-Stack: verhindert "Drift" beim ResetZoom
-// Wir pushen bei jedem Zoom (selection) den PREV-Bereich,
-// und beim Reset holen wir den letzten Bereich wieder raus.
-let zoomStack = [];
 
 // ============================================================
 // 1) HELFER
 // ============================================================
+
 function toLocalDatetimeString(date) {
   function pad(n) { return n.toString().padStart(2, "0"); }
   return (
@@ -64,6 +429,23 @@ function parseMaybeJson(v) {
     }
   }
   return v;
+}
+
+function normalizeAddress(addr) {
+  if (typeof addr !== "string") return addr;
+  return addr.replace(/^\s*(v:|g:|n:)\s*/i, "").trim();
+}
+
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function detectPlantFromAddress(addr) {
+  if (typeof addr !== "string") return "Allgemein";
+  if (addr.indexOf(".Biometano.") !== -1) return "Biometano";
+  if (addr.indexOf(".Belagreen.") !== -1) return "Belagreen";
+  if (addr.indexOf(".BBO.") !== -1) return "BBO";
+  return "Allgemein";
 }
 
 function parseAnyNumber(v) {
@@ -140,13 +522,115 @@ function setTimeRangeInputs(fromMs, toMs) {
   if (toEl) toEl.value = toLocalDatetimeString(new Date(toMs));
 }
 
+// Tagesprogramm: Multi/Single/Legacy robust
 function isTagesprogrammAddress(address) {
+  address = normalizeAddress(address || "");
+
+  if (/^AGENT\.OBJECTS\.(Biometano|Belagreen|BBO)\.System\.Tagesprogramm\./i.test(address)) return true;
+
+  if (singlePlant) {
+    const rx = new RegExp("^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlant) + "\\.System\\.Tagesprogramm\\.", "i");
+    if (rx.test(address)) return true;
+  }
+
   return /^AGENT\.OBJECTS\.System\.Tagesprogramm\./i.test(address);
 }
 
+
 // ============================================================
-// 2) BROWSE HELPERS (Single-Plant)
+// 1b) PAD-SERIE (Fallback-Linien OHNE Tooltip)
 // ============================================================
+
+function seriesIdFromAddress(address) {
+  const a = normalizeAddress(address || "");
+  return "s_" + a.replace(/[^a-z0-9]+/gi, "_");
+}
+
+function addSeriesWithPad(mainOptions) {
+  if (!chart) return null;
+
+  const addr = normalizeAddress(mainOptions.address || "");
+  const mainId = seriesIdFromAddress(addr);
+  const padId = mainId + "_pad";
+
+  const plant = mainOptions.plant || detectPlantFromAddress(addr) || (singlePlant ? singlePlant : "Legacy");
+
+  // Hauptserie (nur echte Daten!)
+  const main = chart.addSeries(
+    {
+      id: mainId,
+      name: mainOptions.name,
+      data: [],
+      address: addr,
+      visible: !!mainOptions.visible,
+      type: mainOptions.type || "line",
+      yAxis: mainOptions.yAxis,
+      loaded: false,
+      group: mainOptions.group,
+      subgroup: mainOptions.subgroup || null,
+      step: mainOptions.step,
+      dataType: mainOptions.dataType || null,
+      plant: plant,
+
+      // Link zur Pad-Serie
+      padSeriesId: padId
+    },
+    false
+  );
+
+  // Pad-Serie (darf künstliche Punkte haben, aber KEIN Tooltip!)
+  const pad = chart.addSeries(
+    {
+      id: padId,
+      name: mainOptions.name,
+      data: [],
+      type: mainOptions.type || "line",
+      yAxis: mainOptions.yAxis,
+      linkedTo: mainId,
+
+      showInLegend: false,
+      enableMouseTracking: false,
+      states: { hover: { enabled: false } },
+      marker: { enabled: false },
+
+      dashStyle: "Solid",
+      lineWidth: 2,
+      visible: !!mainOptions.visible,
+      isPadSeries: true
+    },
+    false
+  );
+
+  // Farbe der Pad-Serie wie Hauptserie
+  try {
+    const c = main && main.color ? main.color : null;
+    if (c) {
+      pad.update(
+        {
+          color: c,
+          lineColor: c,
+          marker: { lineColor: c, fillColor: c }
+        },
+        false
+      );
+    }
+  } catch (e) {}
+
+  return main;
+}
+
+function getPadSeriesFor(mainSeries) {
+  if (!chart || !mainSeries) return null;
+  const padId = mainSeries.options && mainSeries.options.padSeriesId;
+  if (!padId) return null;
+  return chart.get(padId) || null;
+}
+
+
+// ============================================================
+// 2) BROWSE HELPERS (Multi/Single/Legacy)
+// ============================================================
+
 function walkAny(nodeOrMap, out, predicate) {
   if (!nodeOrMap) return;
 
@@ -171,35 +655,67 @@ function walkAny(nodeOrMap, out, predicate) {
   }
 }
 
+function getRegexAnlage() {
+  if (isMultiPlant) {
+    return /^AGENT\.OBJECTS\.(Biometano|Belagreen|BBO)\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+  }
+
+  if (singlePlant) {
+    return new RegExp(
+      "^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlant) + "\\.Anlage\\.[^.]+\\.[^.]+\\.IOs\\.(Istwert|Position_Istwert|Status|Zustand)$",
+      "i"
+    );
+  }
+
+  // Legacy
+  return /^AGENT\.OBJECTS\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+}
+
+// Tagesprogramm: optional ".Automatischer_Eintrag"
+function getRegexTagesprogramm() {
+  if (isMultiPlant) {
+    return /^AGENT\.OBJECTS\.(Biometano|Belagreen|BBO)\.System\.Tagesprogramm\.[^.]+\.[^.]+(\.Automatischer_Eintrag)?\.Heute\.IW_Menge_Tag$/i;
+  }
+
+  if (singlePlant) {
+    return new RegExp(
+      "^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlant) + "\\.System\\.Tagesprogramm\\.[^.]+\\.[^.]+(\\.Automatischer_Eintrag)?\\.Heute\\.IW_Menge_Tag$",
+      "i"
+    );
+  }
+
+  // Legacy (dein bisheriges Schema)
+  return /^AGENT\.OBJECTS\.System\.Tagesprogramm\.[^.]+(\.Automatischer_Eintrag)?\.Heute\.IW_Menge_Tag$/i;
+}
+
 function collectAnlageIOs(treeData) {
   const out = [];
-  const rx =
-    /^AGENT\.OBJECTS\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
-
-  function want(addr) {
-    return typeof addr === "string" && rx.test(addr);
-  }
+  const rx = getRegexAnlage();
+  function want(addr) { return typeof addr === "string" && rx.test(addr); }
   walkAny(treeData, out, want);
   return out;
 }
 
 function collectTagesprogramm(treeData) {
   const out = [];
-  const rx =
-    /^AGENT\.OBJECTS\.System\.Tagesprogramm\.[^.]+\.Heute\.IW_Menge_Tag$/i;
-
-  function want(addr) {
-    return typeof addr === "string" && rx.test(addr);
-  }
+  const rx = getRegexTagesprogramm();
+  function want(addr) { return typeof addr === "string" && rx.test(addr); }
   walkAny(treeData, out, want);
   return out;
 }
 
+
 // ============================================================
-// 3) SERIES DEFINITION
+// 3) SERIES DEFINITION (Multi/Single/Legacy correct indices)
 // ============================================================
+
 function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
+  addr = normalizeAddress(addr);
   const parts = addr.split(".");
+
+  const plant = isMultiPlant
+    ? detectPlantFromAddress(addr)
+    : (singlePlant ? singlePlant : "Legacy");
 
   let name = parts[parts.length - 3] || addr;
   let group = groupOverride || "Ungruppiert";
@@ -208,38 +724,60 @@ function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
   let tryDetectType = null;
   let subgroup = null;
 
-  // Anlage:
-  // AGENT.OBJECTS.Anlage.<Group>.<Var>.IOs.<...>
-  if (/^AGENT\.OBJECTS\.Anlage\./i.test(addr)) {
-    group = groupOverride || parts[3] || "Anlage";
-    name = parts[4] || "?";
+  const isState = /\.Zustand$|\.Status$/i.test(addr);
 
-    if (/\.Zustand$|\.Status$/i.test(addr)) {
+  // Anlage Multi/Single neues Schema: AGENT.OBJECTS.<Plant>.Anlage.<Group>.<Name>.IOs.<...>
+  if (/^AGENT\.OBJECTS\.(Biometano|Belagreen|BBO)\.Anlage\./i.test(addr) || (singlePlant && new RegExp("^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlant) + "\\.Anlage\\.", "i").test(addr))) {
+    group = groupOverride || parts[4] || "Anlage";
+    name = parts[5] || "?";
+
+    if (isState) {
       yAxis = 1;
       step = true;
     } else if (/\.Aktiver_Istwert$/i.test(addr)) {
       yAxis = 6;
       step = true;
     } else {
-      // AGENT.OBJECTS.Anlage.<Group>.<Var>.Intern.Typ
+      tryDetectType = parts.slice(0, 6).join(".") + ".Intern.Typ";
+    }
+  }
+  // Anlage Legacy: AGENT.OBJECTS.Anlage.<Group>.<Name>.IOs.<...>
+  else if (/^AGENT\.OBJECTS\.Anlage\./i.test(addr)) {
+    group = groupOverride || parts[3] || "Anlage";
+    name = parts[4] || "?";
+
+    if (isState) {
+      yAxis = 1;
+      step = true;
+    } else if (/\.Aktiver_Istwert$/i.test(addr)) {
+      yAxis = 6;
+      step = true;
+    } else {
       tryDetectType = parts.slice(0, 5).join(".") + ".Intern.Typ";
     }
   }
-  // Tagesprogramm:
+  // Tagesprogramm (Multi/Single/Legacy)
   else if (isTagesprogrammAddress(addr)) {
     group = groupOverride || "Tagesprogramm";
-    // ...System.Tagesprogramm.<A>.<B>.Automatischer_Eintrag...
-    // A liegt bei parts[4]
-    let tpName = parts[4] || "";
+
+    // robust: finde Segment nach "Tagesprogramm"
+    let tpName = "";
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i] === "Tagesprogramm") {
+        tpName = parts[i + 2] || parts[i + 1] || "";
+        break;
+      }
+    }
+
     name = String(tpName).replace(/_/g, " ").replace(/zu/g, "->");
   }
 
   const visible =
-    q.Variable && addr.indexOf(q.Variable) !== -1
+    (q.Variable && addr.indexOf(normalizeAddress(q.Variable)) !== -1)
       ? true
-      : typeof visibleOverride === "boolean"
-      ? visibleOverride
-      : false;
+      : (typeof visibleOverride === "boolean")
+        ? visibleOverride
+        : false;
 
   return {
     address: addr,
@@ -250,7 +788,7 @@ function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
     step: step,
     visible: visible,
     tryDetectType: tryDetectType,
-    plant: "Anlage"
+    plant: plant
   };
 }
 
@@ -270,213 +808,283 @@ function defsFromConfig(cfg) {
   return defs;
 }
 
-function saveCurrentConfig() {
-  if (!chart) return;
-
-  const manualAddrSet = new Set(
-    manualDefinitions
-      .map(function (d) { return d && d.address; })
-      .filter(function (a) { return typeof a === "string"; })
-  );
-
-  const cfg = { reload: true, source: "config", groups: [] };
-  const grouped = {};
-
-  chart.series.forEach(function (s) {
-    const opts = s.options || {};
-    const addr = opts.address;
-    if (!addr) return;
-    if (manualAddrSet.has(addr)) return;
-
-    const g = opts.group || "Ungruppiert";
-    if (!grouped[g]) grouped[g] = [];
-    grouped[g].push({ address: addr, visible: s.visible });
-  });
-
-  Object.keys(grouped).forEach(function (groupName) {
-    cfg.groups.push({ name: groupName, variables: grouped[groupName] });
-  });
-
-  webMI.data.write(configAddr, JSON.stringify(cfg), function () {});
-}
 
 // ============================================================
 // 4) AGGREGATION: RAW < 1 Woche, sonst 10m Average
 //    - Tagesprogramm: RAW
 //    - Status/Zustand: RAW
 // ============================================================
+
 function getAggregationSimple(from, to, address) {
+  address = normalizeAddress(address);
+
   const diff = to - from;
   const weekMs = 7 * 24 * 3600 * 1000;
 
-  if (isTagesprogrammAddress(address)) {
-    return { agg: null, int: null, unit: null, cat: "raw" };
-  }
-
-  if (diff < weekMs) {
-    return { agg: null, int: null, unit: null, cat: "raw" };
-  }
+  if (isTagesprogrammAddress(address)) return { agg: null, int: null, unit: null, cat: "raw" };
+  if (/\.Zustand$|\.Status$/i.test(address)) return { agg: null, int: null, unit: null, cat: "raw" };
+  if (diff < weekMs) return { agg: null, int: null, unit: null, cat: "raw" };
 
   return { agg: "Average", int: "10", unit: "m", cat: "10m" };
 }
 
+
 // ============================================================
-// 5) FETCH DATA (NoData-Fallback + Randpunkte ±4 Wochen + Current Value)
+// 5) FETCH DATA (Pad-Konzept dramatic safety)  [UPDATED: Token + stale ignore]
 // ============================================================
-function fetchData(series, from, to) {
-  const address = series.options && series.options.address;
-  if (!address) return;
 
-  const manualType = series.options && series.options.dataType;
-  const isState = manualType === "status" || /\.Zustand$|\.Status$/i.test(address);
+function fetchData(series, from, to, options) {
+  if (!series || (series.options && series.options.isPadSeries)) return;
 
-  const fromMs = from.getTime();
-  const toMs = to.getTime();
+  options = options || {};
+  var redraw = (typeof options.redraw === "boolean") ? options.redraw : true;
+  var onDone = (typeof options.onDone === "function") ? options.onDone : null;
 
-  const weekMs = 7 * 24 * 3600 * 1000;
-  const lookMs = 4 * weekMs;
-  const bfFromMs = Math.max(0, fromMs - lookMs);
-  const ffToMs = toMs + lookMs;
+  // NEW: reload token (stale responses ignorieren)
+  var token = (typeof options.token === "number") ? options.token : 0;
+
+  var address = series.options && series.options.address;
+  if (!address) { if (onDone) onDone(); return; }
+
+  address = normalizeAddress(address);
+
+  var padSeries = getPadSeriesFor(series);
+
+  var manualType = series.options && series.options.dataType;
+  var forcedState = manualType === "status";
+  var forcedTP = manualType === "tagesprogramm";
+  var isState = forcedState || /\.Zustand$|\.Status$/i.test(address);
+  var isTP = forcedTP || isTagesprogrammAddress(address);
+
+  var fromMs = from.getTime();
+  var toMs = to.getTime();
+
+  // -------------------------------
+  // LIVE-MODE: Pad-Linien komplett aus
+  // -------------------------------
+  var liveNoPad = !!liveMode;
+
+  function finishEarlyIfStale() {
+    // Wenn ein neuer Reload gestartet wurde, diese Antwort ignorieren,
+    // aber Pending sauber freigeben:
+    if (token && token !== fetchTokenCounter) {
+      if (onDone) onDone();
+      return true;
+    }
+    return false;
+  }
 
   function qf(filter, cb) {
     webMI.data.queryFilter(filter, function (res) { cb(res); });
   }
 
   function buildMainFilter() {
-    const filter = {
+    var filter = {
       type: ["v:1"],
       address: ["v:" + address],
       timestamp: ["n:>=" + fromMs + "<=" + toMs]
     };
 
-    if (!isState) {
-      const agg = getAggregationSimple(from, to, address);
+    if (!isState && !isTP) {
+      var agg = getAggregationSimple(from, to, address);
       if (agg && agg.agg) {
         filter.aggregate = ["v:" + agg.agg];
         filter.interval = ["v:" + agg.int];
         filter.unit = ["v:" + agg.unit];
       }
     }
+
     return filter;
   }
 
-  function buildBackfillFilter() {
-    return {
-      type: ["v:1"],
-      address: ["v:" + address],
-      timestamp: ["n:>=" + bfFromMs + "<=" + fromMs]
-    };
-  }
-
-  function buildForwardFilter() {
-    return {
-      type: ["v:1"],
-      address: ["v:" + address],
-      timestamp: ["n:>=" + toMs + "<=" + ffToMs]
-    };
-  }
-
-  function applyData(pointsXY) {
-    series.setData(pointsXY, true);
+  function applyMainData(pointsXY, doRedraw) {
+    series.setData(pointsXY, doRedraw);
     series.options.loaded = true;
     series.options.from = fromMs;
     series.options.to = toMs;
   }
 
-  function nowIsInsideRange() {
-    const now = Date.now();
-    return now >= fromMs && now <= toMs;
+  function applyPadData(pointsXY, doRedraw) {
+    if (!padSeries) return;
+    padSeries.setData(pointsXY, doRedraw);
   }
 
-  function tryDrawWithCurrentValueIfNeeded(doneIfNotPossible) {
-    if (!nowIsInsideRange()) { doneIfNotPossible(); return; }
-
-    webMI.data.read(address, function (e) {
-      const v = e && e.value != null ? e.value : null;
-      const cur = parseAnyNumber(v);
-      if (isNaN(cur)) { doneIfNotPossible(); return; }
-      applyData([[fromMs, cur], [toMs, cur]]);
-    });
+  function clearPad(doRedraw) {
+    applyPadData([], doRedraw);
   }
+
+  // Im Live-Modus: Pad immer leer halten
+  if (liveNoPad) {
+    clearPad(false);
+  }
+
+  // Im Live/Zoom wollen wir NICHT pro Serie redrawen -> redraw kommt zentral über reloadVisible/onDone
+  var doRedraw = redraw;
 
   qf(buildMainFilter(), function (mainRes) {
-    const mainData = normalizeResultToXY(mainRes);
+    if (finishEarlyIfStale()) return;
 
-    // A) Daten im Fenster vorhanden -> Randpunkte ergänzen falls nötig
-    if (mainData.length > 0) {
-      const first = mainData[0];
-      const last = mainData[mainData.length - 1];
+    var mainData = normalizeResultToXY(mainRes);
 
-      const needLeft = first[0] > fromMs;
-      const needRight = last[0] < toMs;
+    if (!liveNoPad) {
+      clearPad(false);
+    }
 
-      const points = mainData.slice();
+    // Hauptserie setzen (meist redraw=false)
+    applyMainData(mainData, doRedraw);
 
-      function doLeft(done) {
-        if (!needLeft) { done(); return; }
-        qf(buildBackfillFilter(), function (bfRes) {
-          const bfData = normalizeResultToXY(bfRes);
-          if (bfData.length) points.unshift([fromMs, bfData[bfData.length - 1][1]]);
-          else points.unshift([fromMs, first[1]]);
-          done();
-        });
-      }
-
-      // Rechts: NICHT vordatieren -> bis to mit letztem Wert weiterziehen
-      function doRight(done) {
-        if (!needRight) { done(); return; }
-        qf(buildForwardFilter(), function () {
-          points.push([toMs, last[1]]);
-          done();
-        });
-      }
-
-      doLeft(function () {
-        doRight(function () {
-          points.sort(function (a, b) { return a[0] - b[0]; });
-          applyData(points);
-        });
-      });
+    // ---------------------------------------------------------
+    // LIVE: Pad aus, sofort fertig melden (und NICHT nachtriggern)
+    // ---------------------------------------------------------
+    if (liveNoPad) {
+      if (onDone) onDone();
+      else if (redraw && chart) chart.redraw();
       return;
     }
 
-    // B) Nichts im Fenster -> links/rechts suchen
-    qf(buildBackfillFilter(), function (bfRes) {
-      const bfData = normalizeResultToXY(bfRes);
-      const lastBefore = bfData.length ? bfData[bfData.length - 1] : null;
+    // ---------------------------------------------------------
+    // Pad-Logik NUR im Historie-Modus
+    // ---------------------------------------------------------
+    var weekMs = 7 * 24 * 3600 * 1000;
+    var lookMs = 4 * weekMs;
+    var bfFromMs = Math.max(0, fromMs - lookMs);
+    var ffToMs = toMs + lookMs;
 
-      qf(buildForwardFilter(), function (ffRes) {
-        const ffData = normalizeResultToXY(ffRes);
-        const firstAfter = ffData.length ? ffData[0] : null;
+    function buildBackfillFilter() {
+      return {
+        type: ["v:1"],
+        address: ["v:" + address],
+        timestamp: ["n:>=" + bfFromMs + "<=" + fromMs]
+      };
+    }
 
-        if (lastBefore && firstAfter) {
-          applyData([[fromMs, lastBefore[1]], [toMs, firstAfter[1]]]);
+    function buildForwardFilter() {
+      return {
+        type: ["v:1"],
+        address: ["v:" + address],
+        timestamp: ["n:>=" + toMs + "<=" + ffToMs]
+      };
+    }
+
+    function drawPadFlat(y) { applyPadData([[fromMs, y], [toMs, y]], false); }
+
+    function drawPadLeftExtension(leftY, firstRealPoint) {
+      if (!firstRealPoint) return;
+      var firstTs = firstRealPoint[0];
+      var firstY = firstRealPoint[1];
+      if (firstTs <= fromMs) return;
+      applyPadData([[fromMs, leftY], [firstTs, firstY]], false);
+    }
+
+    function drawPadRightExtension(lastRealPoint, rightY) {
+      if (!lastRealPoint) return;
+      var lastTs = lastRealPoint[0];
+      var lastY = lastRealPoint[1];
+      if (lastTs >= toMs) return;
+      applyPadData([[lastTs, lastY], [toMs, rightY]], false);
+    }
+
+    function nowIsInsideRange() {
+      var now = Date.now();
+      return now >= fromMs && now <= toMs;
+    }
+
+    // A) echte Daten im Fenster -> nur Rand auffüllen (Pad)
+    if (mainData.length > 0) {
+      var first = mainData[0];
+      var last = mainData[mainData.length - 1];
+
+      var needLeft = first[0] > fromMs;
+      var needRight = last[0] < toMs;
+
+      // Wir sind (für "fertig") bereits nach Main-Query fertig:
+      if (onDone) onDone();
+
+      if (needLeft) {
+        qf(buildBackfillFilter(), function (bfRes) {
+          if (finishEarlyIfStale()) return;
+
+          var bfData = normalizeResultToXY(bfRes);
+          var lastBefore = bfData.length ? bfData[bfData.length - 1] : null;
+
+          if (lastBefore) drawPadLeftExtension(lastBefore[1], first);
+          else drawPadLeftExtension(first[1], first);
+
+          if (redraw && chart) chart.redraw();
+        });
+      }
+
+      if (needRight) {
+        qf(buildForwardFilter(), function (ffRes) {
+          if (finishEarlyIfStale()) return;
+
+          var ffData = normalizeResultToXY(ffRes);
+          var firstAfter = ffData.length ? ffData[0] : null;
+
+          if (firstAfter) drawPadRightExtension(last, firstAfter[1]);
+          else drawPadRightExtension(last, last[1]);
+
+          if (redraw && chart) chart.redraw();
+        });
+      }
+
+      return;
+    }
+
+    // B) keine echten Daten -> Pad als Visual-Fallback
+    // Auch hier: "fertig" nach Main-Query, Pads kommen ggf. später
+    if (onDone) onDone();
+
+    qf(buildBackfillFilter(), function (bfRes2) {
+      if (finishEarlyIfStale()) return;
+
+      var bfData2 = normalizeResultToXY(bfRes2);
+      var lastBefore2 = bfData2.length ? bfData2[bfData2.length - 1] : null;
+
+      qf(buildForwardFilter(), function (ffRes2) {
+        if (finishEarlyIfStale()) return;
+
+        var ffData2 = normalizeResultToXY(ffRes2);
+        var firstAfter2 = ffData2.length ? ffData2[0] : null;
+
+        if (lastBefore2 && firstAfter2) {
+          applyPadData([[fromMs, lastBefore2[1]], [toMs, firstAfter2[1]]], false);
+          if (redraw && chart) chart.redraw();
           return;
         }
-        if (lastBefore) {
-          applyData([[fromMs, lastBefore[1]], [toMs, lastBefore[1]]]);
-          return;
-        }
-        if (firstAfter) {
-          applyData([[fromMs, firstAfter[1]], [toMs, firstAfter[1]]]);
+        if (lastBefore2) { drawPadFlat(lastBefore2[1]); if (redraw && chart) chart.redraw(); return; }
+        if (firstAfter2) { drawPadFlat(firstAfter2[1]); if (redraw && chart) chart.redraw(); return; }
+
+        if (nowIsInsideRange()) {
+          webMI.data.read(address, function (e) {
+            if (finishEarlyIfStale()) return;
+
+            var v = e && e.value != null ? e.value : null;
+            var cur = parseAnyNumber(v);
+            if (isNaN(cur)) { clearPad(false); if (redraw && chart) chart.redraw(); return; }
+            drawPadFlat(cur);
+            if (redraw && chart) chart.redraw();
+          });
           return;
         }
 
-        // C) Gar nichts gefunden -> wenn jetzt im Fenster: aktuelle Linie, sonst leer
-        tryDrawWithCurrentValueIfNeeded(function () { applyData([]); });
+        clearPad(false);
+        if (redraw && chart) chart.redraw();
       });
     });
   });
 }
 
 // ============================================================
-// 6) Y-ACHSE (FIX)
+// 6) Y-ACHSE (FIX) (Pad ignorieren)
 // ============================================================
+
 function updateYAxisRangesAndRedraw() {
   if (!chart) return;
 
   const yUsed = new Set();
   chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return;
     if (s.visible) yUsed.add(s.options.yAxis);
   });
 
@@ -500,38 +1108,84 @@ function updateYAxisRangesAndRedraw() {
 }
 
 // ============================================================
-// 7) RELOAD VISIBLE (Range aus Inputs) + ZoomStack reset
+// 7) RELOAD VISIBLE (Range aus Inputs)
 // ============================================================
-function reloadVisible() {
+
+
+
+let liveReloadInFlight = false;
+let liveReloadBusy = false;
+// ============================================================
+// 7) RELOAD VISIBLE (Range aus Inputs)  [SIMPLE: busy-guard]
+// ============================================================
+
+function reloadVisible(options) {
   if (!chart) return;
 
-  // Wenn User "Laden" klickt: Zoom-Historie zurücksetzen,
-  // damit ResetZoom sauber nur innerhalb der aktuellen Session arbeitet.
-  zoomStack = [];
+  options = options || {};
+  var doAxis = (typeof options.setExtremes === "boolean") ? options.setExtremes : true;
+  var doYAxisUpdate = (typeof options.updateYAxis === "boolean") ? options.updateYAxis : true;
+  var doRedrawOnce = (typeof options.redrawOnce === "boolean") ? options.redrawOnce : true;
 
-  const tr = getTimeRange();
+  // SIMPLE: Live -> wenn noch am Laden, NICHT stapeln
+  if (liveMode && liveReloadBusy) return;
 
-  suppressAfterSetExtremes = true;
-  chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
-  suppressAfterSetExtremes = false;
+  var tr = getTimeRange();
+  var fromMs = tr.from.getTime();
+  var toMs = tr.to.getTime();
+
+  if (doAxis) {
+    suppressAfterSetExtremes = true;
+    chart.xAxis[0].setExtremes(fromMs, toMs, false, false, { trigger: "internal" });
+    suppressAfterSetExtremes = false;
+  }
+
+  var pending = 0;
 
   chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return;
     if (!s.visible) return;
-    fetchData(s, tr.from, tr.to);
+    pending++;
   });
 
-  updateYAxisRangesAndRedraw();
-
-  // Falls ResetZoom Button existiert: weg damit (sonst bleibt er nach "Laden" evtl. stehen)
-  if (chart && chart.resetZoomButton) {
-    chart.resetZoomButton.destroy();
-    chart.resetZoomButton = null;
+  // Keine sichtbaren Serien -> nur redraw
+  if (pending === 0) {
+    if (doRedrawOnce) chart.redraw();
+    return;
   }
+
+  // Live busy setzen
+  if (liveMode) liveReloadBusy = true;
+
+  function doneOne() {
+    pending--;
+    if (pending > 0) return;
+
+    // fertig
+    if (liveMode) liveReloadBusy = false;
+
+    if (doYAxisUpdate && !liveMode) {
+      updateYAxisRangesAndRedraw(); // enthält redraw
+      return;
+    }
+
+    if (doRedrawOnce) chart.redraw();
+  }
+
+  chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return;
+    if (!s.visible) return;
+
+    fetchData(s, tr.from, tr.to, { redraw: false, onDone: doneOne });
+  });
 }
 
+
+
 // ============================================================
-// 8) SERIEN AUFBAU + LEGENDE + Sortierung per SortOrder
+// 8) SERIEN AUFBAU + LEGENDE
 // ============================================================
+
 function addDiscoveredSeries(addressDefs, opts) {
   const afterAddSave = opts && typeof opts.afterAddSave === "boolean" ? opts.afterAddSave : false;
   let pendingTypeReads = 0;
@@ -540,26 +1194,26 @@ function addDiscoveredSeries(addressDefs, opts) {
 
   // Manual defs
   manualDefinitions.forEach(function (def) {
-    const isStatus = def.dataType === "status";
-    chart.addSeries(
-      {
-        name: def.name || def.group,
-        data: [],
-        address: def.address,
-        visible: !!def.visible,
-        type: "line",
-        yAxis: typeof def.yAxis === "number" ? def.yAxis : isStatus ? 1 : 0,
-        loaded: false,
-        group: def.group || "Allgemein",
-        subgroup: def.subgroup || null,
-        step: isStatus ? "left" : def.step ? "left" : undefined,
-        dataType: def.dataType || "value",
-        plant: "Anlage"
-      },
-      false
-    );
+    if (!def || !def.address) return;
+
+    const addr = normalizeAddress(def.address);
+    const isStatus = def.dataType === "status" || /\.Zustand$|\.Status$/i.test(addr);
+
+    addSeriesWithPad({
+      name: def.name || def.group || addr,
+      address: addr,
+      visible: !!def.visible,
+      type: "line",
+      yAxis: (typeof def.yAxis === "number") ? def.yAxis : (isStatus ? 1 : 0),
+      group: def.group || "Allgemein",
+      subgroup: def.subgroup || null,
+      step: isStatus ? "left" : (def.step ? "left" : undefined),
+      dataType: def.dataType || "value",
+      plant: def.plant || detectPlantFromAddress(addr) || (singlePlant ? singlePlant : "Legacy")
+    });
   });
 
+  // Auto defs
   addressDefs.forEach(function (def) {
     const isStateAddr = /\.Zustand$|\.Status$/i.test(def.address);
 
@@ -578,43 +1232,33 @@ function addDiscoveredSeries(addressDefs, opts) {
           case "Gasleck- Sensor": yIdx = 0; break;
         }
 
-        chart.addSeries(
-          {
-            name: def.name,
-            data: [],
-            address: def.address,
-            visible: !!def.visible,
-            type: "line",
-            yAxis: yIdx,
-            loaded: false,
-            group: def.group,
-            subgroup: def.subgroup || null,
-            step: def.step ? "left" : undefined,
-            plant: "Anlage"
-          },
-          false
-        );
+        addSeriesWithPad({
+          name: def.name,
+          address: normalizeAddress(def.address),
+          visible: !!def.visible,
+          type: "line",
+          yAxis: yIdx,
+          group: def.group,
+          subgroup: def.subgroup || null,
+          step: def.step ? "left" : undefined,
+          plant: def.plant || detectPlantFromAddress(def.address) || (singlePlant ? singlePlant : "Legacy")
+        });
 
         pendingTypeReads--;
         if (pendingTypeReads === 0) finalizeAdd();
       });
     } else {
-      chart.addSeries(
-        {
-          name: def.name,
-          data: [],
-          address: def.address,
-          visible: !!def.visible,
-          type: "line",
-          yAxis: def.yAxis != null ? def.yAxis : isStateAddr ? 1 : 0,
-          loaded: false,
-          group: def.group,
-          subgroup: def.subgroup || null,
-          step: def.step ? "left" : undefined,
-          plant: "Anlage"
-        },
-        false
-      );
+      addSeriesWithPad({
+        name: def.name,
+        address: normalizeAddress(def.address),
+        visible: !!def.visible,
+        type: "line",
+        yAxis: def.yAxis != null ? def.yAxis : (isStateAddr ? 1 : 0),
+        group: def.group,
+        subgroup: def.subgroup || null,
+        step: def.step ? "left" : undefined,
+        plant: def.plant || detectPlantFromAddress(def.address) || (singlePlant ? singlePlant : "Legacy")
+      });
     }
   });
 
@@ -625,7 +1269,9 @@ function addDiscoveredSeries(addressDefs, opts) {
     buildLegend();
 
     const tr = getTimeRange();
+
     chart.series.forEach(function (s) {
+      if (s.options && s.options.isPadSeries) return;
       if (s.visible && !s.options.loaded) fetchData(s, tr.from, tr.to);
     });
 
@@ -639,27 +1285,40 @@ function addDiscoveredSeries(addressDefs, opts) {
   }
 }
 
+
+// ============================================================
+// 8b) LEGENDE (Multi: Plant -> Group -> Subgroup; Pad ausgeschlossen)
+// ============================================================
+
 function buildLegend() {
   const container = document.getElementById("html-tree");
   if (!container || !chart) return;
 
   container.innerHTML = "";
 
-  // groups[group][sub] = series[]
-  const groups = {};
+  // plants[plant][group][sub] = series[]
+  const plants = {};
+
   chart.series.forEach(function (s) {
+    if (s.options && s.options.isPadSeries) return;
+
+    const addr = normalizeAddress(s.options && s.options.address);
+    const plant = (s.options && s.options.plant) ? s.options.plant : detectPlantFromAddress(addr);
+
+    if (!plants[plant]) plants[plant] = {};
+
     const g = (s.options && s.options.group) ? s.options.group : "Ungruppiert";
     const sub = (s.options && s.options.subgroup) ? s.options.subgroup : null;
 
-    if (!groups[g]) groups[g] = {};
-    if (!groups[g][sub]) groups[g][sub] = [];
-    groups[g][sub].push(s);
+    if (!plants[plant][g]) plants[plant][g] = {};
+    if (!plants[plant][g][sub]) plants[plant][g][sub] = [];
+    plants[plant][g][sub].push(s);
   });
 
-  function getSortIndex(name) {
-    if (!Array.isArray(sortList) || !sortList.length) return -1;
-    for (let i = 0; i < sortList.length; i++) {
-      const item = sortList[i];
+  function getSortIndexFromList(list, name) {
+    if (!Array.isArray(list) || !list.length) return -1;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
       if (!item) continue;
       if (item["1"] === name) return i;
       if (item[1] === name) return i;
@@ -670,168 +1329,328 @@ function buildLegend() {
     return -1;
   }
 
-  const allGroupNames = Object.keys(groups);
-  const hasAllgemein = allGroupNames.indexOf("Allgemein") !== -1;
-  const hasTagesprogramm = allGroupNames.indexOf("Tagesprogramm") !== -1;
+  const plantNames = Object.keys(plants).sort(function (a, b) { return a.localeCompare(b); });
 
-  const middle = allGroupNames.filter(function (g) {
-    if (g === "Allgemein") return false;
-    if (g === "Tagesprogramm") return false;
-    return true;
-  });
-
-  middle.sort(function (a, b) {
-    const ia = getSortIndex(a);
-    const ib = getSortIndex(b);
-
-    if (ia !== -1 && ib !== -1) return ia - ib;
-    if (ia !== -1) return -1;
-    if (ib !== -1) return 1;
-    return a.localeCompare(b);
-  });
-
-  const groupNames = [];
-  if (hasAllgemein) groupNames.push("Allgemein");
-  groupNames.push.apply(groupNames, middle);
-  if (hasTagesprogramm) groupNames.push("Tagesprogramm");
-
-  groupNames.forEach(function (gName, idx) {
-    if (idx > 0) {
-      const hr = top.document.createElement("hr");
-      hr.style.border = "0";
-      hr.style.borderTop = "1px solid #444";
-      hr.style.margin = "10px 0";
-      container.appendChild(hr);
+  plantNames.forEach(function (plantName, pIdx) {
+    if (pIdx > 0 && isMultiPlant) {
+      const hrPlant = top.document.createElement("hr");
+      hrPlant.style.border = "0";
+      hrPlant.style.borderTop = "1px solid #444";
+      hrPlant.style.margin = "10px 0";
+      container.appendChild(hrPlant);
     }
 
-    const header = top.document.createElement("div");
-    header.style.fontWeight = "bold";
-    header.style.marginTop = "10px";
-    header.style.cursor = "pointer";
-    header.style.fontSize = "13px";
-
-    const displayName = String(gName).replace(/_/g, " ");
+    // Plant header (nur Multi sichtbar)
+    const plantHeader = top.document.createElement("div");
+    plantHeader.style.fontWeight = "bold";
+    plantHeader.style.cursor = "pointer";
+    plantHeader.style.fontSize = "16px";
+    plantHeader.style.marginTop = "12px";
+    plantHeader.style.marginBottom = "4px";
+    plantHeader.style.color = "#222";
+    plantHeader.textContent = plantName;
 
     try {
       webMI.data.call(
         "Standard_elpo",
-        { Funktion: "Translate", Text: displayName, Sprache: language },
-        function (resp) { header.textContent = resp && resp.result ? resp.result : displayName; }
+        { Funktion: "Translate", Text: plantName, Sprache: language },
+        function (resp) {
+          plantHeader.textContent = (resp && resp.result) ? resp.result : plantName;
+        }
       );
-    } catch (e) {
-      header.textContent = displayName;
+    } catch (e) {}
+
+    if (isMultiPlant) container.appendChild(plantHeader);
+
+    const plantBody = top.document.createElement("div");
+    plantBody.style.marginLeft = "8px";
+    plantBody.style.display = isMultiPlant ? "none" : "block";
+    container.appendChild(plantBody);
+
+    if (isMultiPlant) {
+      plantHeader.addEventListener("click", function () {
+        plantBody.style.display = (plantBody.style.display === "none") ? "block" : "none";
+      });
     }
 
-    container.appendChild(header);
+    const groups = plants[plantName];
 
-    const body = top.document.createElement("div");
-    body.style.marginLeft = "8px";
-    body.style.display = "none";
-    container.appendChild(body);
+    // Sortlist pro plant
+    const rawSort = parseMaybeJson(sortMap[plantName]);
+    const plantSortList = Array.isArray(rawSort) ? rawSort : sortList;
 
-    const hasVisible = Object.values(groups[gName]).some(function (arr) {
-      return arr.some(function (s) { return s.visible; });
-    });
-    if (hasVisible) body.style.display = "block";
+    const allGroupNames = Object.keys(groups);
+    const hasAllgemein = allGroupNames.indexOf("Allgemein") !== -1;
+    const hasTagesprogramm = allGroupNames.indexOf("Tagesprogramm") !== -1;
 
-    header.addEventListener("click", function () {
-      body.style.display = body.style.display === "none" ? "block" : "none";
-    });
-
-    const subgroups = groups[gName];
-    const sortedSubs = Object.keys(subgroups).sort(function (a, b) {
-      if (a === "null") return -1;
-      if (b === "null") return 1;
-      return String(a).localeCompare(String(b));
+    const middle = allGroupNames.filter(function (g) {
+      if (g === "Allgemein") return false;
+      if (g === "Tagesprogramm") return false;
+      return true;
     });
 
-    sortedSubs.forEach(function (sub) {
-      let targetContainer = body;
+    middle.sort(function (a, b) {
+      const ia = getSortIndexFromList(plantSortList, a);
+      const ib = getSortIndexFromList(plantSortList, b);
 
-      if (sub && sub !== "null") {
-        const subHeader = top.document.createElement("div");
-        subHeader.style.fontStyle = "italic";
-        subHeader.style.marginLeft = "8px";
-        subHeader.style.cursor = "pointer";
-        subHeader.style.fontWeight = "bold";
-        subHeader.style.marginTop = "4px";
-        subHeader.style.fontSize = "12px";
-        subHeader.textContent = sub;
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b);
+    });
 
-        const subBody = top.document.createElement("div");
-        subBody.style.marginLeft = "8px";
-        subBody.style.display = "none";
+    const groupNames = [];
+    if (hasAllgemein) groupNames.push("Allgemein");
+    groupNames.push.apply(groupNames, middle);
+    if (hasTagesprogramm) groupNames.push("Tagesprogramm");
 
-        subHeader.addEventListener("click", function (e) {
-          e.stopPropagation();
-          subBody.style.display = subBody.style.display === "none" ? "block" : "none";
-        });
-
-        body.appendChild(subHeader);
-        body.appendChild(subBody);
-        targetContainer = subBody;
+    groupNames.forEach(function (gName, idx) {
+      if (idx > 0) {
+        const hr = top.document.createElement("hr");
+        hr.style.border = "0";
+        hr.style.borderTop = "1px solid #444";
+        hr.style.margin = "10px 0";
+        plantBody.appendChild(hr);
       }
 
-      const seriesList = subgroups[sub];
-      seriesList
-        .sort(function (a, b) { return a.name.localeCompare(b.name); })
-        .forEach(function (s) {
-          const row = top.document.createElement("div");
-          row.textContent = s.name;
-          row.style.cursor = "pointer";
-          row.style.padding = "2px 8px";
-          row.style.marginLeft = "8px";
-          row.style.color = s.visible ? s.color : "#666";
-          row.style.fontWeight = s.visible ? "bold" : "normal";
+      const header = top.document.createElement("div");
+      header.style.fontWeight = "bold";
+      header.style.marginTop = "10px";
+      header.style.cursor = "pointer";
+      header.style.fontSize = "13px";
 
-          row.addEventListener("click", function (e) {
+      const displayName = String(gName).replace(/_/g, " ");
+
+      try {
+        webMI.data.call(
+          "Standard_elpo",
+          { Funktion: "Translate", Text: displayName, Sprache: language },
+          function (resp) { header.textContent = resp && resp.result ? resp.result : displayName; }
+        );
+      } catch (e) {
+        header.textContent = displayName;
+      }
+
+      plantBody.appendChild(header);
+
+      const body = top.document.createElement("div");
+      body.style.marginLeft = "8px";
+      body.style.display = "none";
+      plantBody.appendChild(body);
+
+      const hasVisible = Object.values(groups[gName]).some(function (arr) {
+        return arr.some(function (s) { return s.visible; });
+      });
+      if (hasVisible) body.style.display = "block";
+
+      header.addEventListener("click", function () {
+        body.style.display = body.style.display === "none" ? "block" : "none";
+      });
+
+      const subgroups = groups[gName];
+      const sortedSubs = Object.keys(subgroups).sort(function (a, b) {
+        if (a === "null") return -1;
+        if (b === "null") return 1;
+        return String(a).localeCompare(String(b));
+      });
+
+      sortedSubs.forEach(function (sub) {
+        let targetContainer = body;
+
+        if (sub && sub !== "null") {
+          const subHeader = top.document.createElement("div");
+          subHeader.style.fontStyle = "italic";
+          subHeader.style.marginLeft = "8px";
+          subHeader.style.cursor = "pointer";
+          subHeader.style.fontWeight = "bold";
+          subHeader.style.marginTop = "4px";
+          subHeader.style.fontSize = "12px";
+          subHeader.textContent = sub;
+
+          const subBody = top.document.createElement("div");
+          subBody.style.marginLeft = "8px";
+          subBody.style.display = "none";
+
+          subHeader.addEventListener("click", function (e) {
             e.stopPropagation();
-
-            const show = !s.visible;
-            s.setVisible(show, false);
-
-            row.style.fontWeight = show ? "bold" : "normal";
-            row.style.color = show ? s.color : "#666";
-
-            const tr = getTimeRange();
-            if (show) fetchData(s, tr.from, tr.to);
-
-            suppressAfterSetExtremes = true;
-            chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
-            suppressAfterSetExtremes = false;
-
-            updateYAxisRangesAndRedraw();
+            subBody.style.display = subBody.style.display === "none" ? "block" : "none";
           });
 
-          targetContainer.appendChild(row);
-        });
+          body.appendChild(subHeader);
+          body.appendChild(subBody);
+          targetContainer = subBody;
+        }
+
+        const seriesList = subgroups[sub];
+        seriesList
+          .sort(function (a, b) { return a.name.localeCompare(b.name); })
+          .forEach(function (s) {
+            const row = top.document.createElement("div");
+            row.textContent = s.name;
+            row.style.cursor = "pointer";
+            row.style.padding = "2px 8px";
+            row.style.marginLeft = "8px";
+            row.style.color = s.visible ? s.color : "#666";
+            row.style.fontWeight = s.visible ? "bold" : "normal";
+
+            row.addEventListener("click", function (e) {
+              e.stopPropagation();
+
+              const show = !s.visible;
+
+              // Hauptserie toggeln
+              s.setVisible(show, false);
+
+              // Pad-Serie synchron toggeln
+              const pad = getPadSeriesFor(s);
+              if (pad) {
+                pad.setVisible(show, false);
+                if (!show) pad.setData([], false);
+              }
+
+              row.style.fontWeight = show ? "bold" : "normal";
+              row.style.color = show ? s.color : "#666";
+
+              const tr = getTimeRange();
+              if (show) fetchData(s, tr.from, tr.to);
+
+              suppressAfterSetExtremes = true;
+              chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+              suppressAfterSetExtremes = false;
+
+              updateYAxisRangesAndRedraw();
+            });
+
+            targetContainer.appendChild(row);
+          });
+      });
     });
   });
 }
 
+
 // ============================================================
-// 9) CONFIG/BROWSE LADEN (Single-Plant)
+// 9) CONFIG speichern (Pad ignorieren, manual ignorieren)
 // ============================================================
+
+function saveCurrentConfig() {
+  if (!chart) return;
+
+  const manualAddrSet = new Set(
+    manualDefinitions
+      .map(function (d) { return d && normalizeAddress(d.address); })
+      .filter(function (a) { return typeof a === "string"; })
+  );
+
+  const cfg = { reload: true, source: "config", groups: [] };
+  const grouped = {};
+
+  chart.series.forEach(function (s) {
+    const opts = s.options || {};
+    if (opts.isPadSeries) return;
+
+    const addr = normalizeAddress(opts.address);
+    if (!addr) return;
+    if (manualAddrSet.has(addr)) return;
+
+    const g = opts.group || "Ungruppiert";
+    if (!grouped[g]) grouped[g] = [];
+    grouped[g].push({ address: addr, visible: s.visible });
+  });
+
+  Object.keys(grouped).forEach(function (groupName) {
+    cfg.groups.push({ name: groupName, variables: grouped[groupName] });
+  });
+
+  webMI.data.write(configAddr, JSON.stringify(cfg), function () {});
+}
+
+
+// ============================================================
+// 10) CONFIG/BROWSE LADEN (Multi/Single/Legacy)
+// ============================================================
+
 function loadFromConfigOrBrowse() {
   webMI.data.read(configAddr, function (ce) {
     const cfgRaw = ce && ce.value ? ce.value : null;
     const cfg = parseConfig(cfgRaw);
 
+    // 1) CONFIG hat immer Priorität
     const cfgDefs = defsFromConfig(cfg);
-    const configIsEmpty = cfgDefs.length === 0;
-
-    if (!configIsEmpty) {
+    if (cfgDefs.length > 0) {
       addDiscoveredSeries(cfgDefs, { afterAddSave: false });
       return;
     }
 
-    if (!browseAll) {
-      addDiscoveredSeries([], { afterAddSave: false });
+    // 2) Nur wenn Config leer/ungültig -> BROWSE und danach Config speichern
+    const allAddrs = [];
+
+    // Multi: browse pro Plant
+    if (isMultiPlant) {
+      const plantsToBrowse = defaultPlants.slice(0);
+
+      function browsePlant(i) {
+        if (i >= plantsToBrowse.length) {
+          const defs = allAddrs.map(function (addr) { return makeSeriesDefFromAddress(addr); });
+          addDiscoveredSeries(defs, { afterAddSave: true }); // <- speichert dann Config
+          return;
+        }
+
+        const plant = plantsToBrowse[i];
+        const paths = [
+          "AGENT.OBJECTS." + plant + ".Anlage",
+          "AGENT.OBJECTS." + plant + ".System.Tagesprogramm"
+        ];
+
+        function browsePath(j) {
+          if (j >= paths.length) { browsePlant(i + 1); return; }
+
+          webMI.data.call("BrowseNodes", { startAddress: paths[j] }, function (tree) {
+            if (paths[j].indexOf(".Anlage") !== -1) {
+              allAddrs.push.apply(allAddrs, collectAnlageIOs(tree));
+            } else {
+              allAddrs.push.apply(allAddrs, collectTagesprogramm(tree));
+            }
+            browsePath(j + 1);
+          });
+        }
+
+        browsePath(0);
+      }
+
+      browsePlant(0);
       return;
     }
 
-    const allAddrs = [];
+    // Single neues Schema
+    if (singlePlant) {
+      const pathsSingle = [
+        "AGENT.OBJECTS." + singlePlant + ".Anlage",
+        "AGENT.OBJECTS." + singlePlant + ".System.Tagesprogramm"
+      ];
 
+      function browsePathSingle(j) {
+        if (j >= pathsSingle.length) {
+          const defs = allAddrs.map(function (addr) { return makeSeriesDefFromAddress(addr); });
+          addDiscoveredSeries(defs, { afterAddSave: true });
+          return;
+        }
+
+        webMI.data.call("BrowseNodes", { startAddress: pathsSingle[j] }, function (tree) {
+          if (pathsSingle[j].indexOf(".Anlage") !== -1) {
+            allAddrs.push.apply(allAddrs, collectAnlageIOs(tree));
+          } else {
+            allAddrs.push.apply(allAddrs, collectTagesprogramm(tree));
+          }
+          browsePathSingle(j + 1);
+        });
+      }
+
+      browsePathSingle(0);
+      return;
+    }
+
+    // Legacy
     webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS.Anlage" }, function (treeAnlage) {
       allAddrs.push.apply(allAddrs, collectAnlageIOs(treeAnlage));
 
@@ -845,76 +1664,28 @@ function loadFromConfigOrBrowse() {
   });
 }
 
+
+
 // ============================================================
-// 10) CHART (Zoom per Drag + stabiler ResetZoom)
+// 11) CHART (Standard Highcharts Zoom/Reset)
 // ============================================================
+
 function drawChart() {
+  var chartTitle = isMultiPlant ? "T{Übersicht}" : (singlePlant ? ("T{" + singlePlant + "}") : "");
+
   chart = top.Highcharts.chart(document.getElementById("container"), {
     chart: {
       style: { fontSize: "11px" },
-
-      // Zoom per Drag
-      zoomType: "x",
-
       events: {
         load: function () {
-          // neue Session -> zoomStack leeren
-          zoomStack = [];
           loadFromConfigOrBrowse();
-        },
-
-        selection: function (e) {
-          // Reset-Zoom (Button)
-          if (e && e.resetSelection) {
-            if (liveMode) return false;
-
-            if (zoomStack.length > 0) {
-              const prev = zoomStack.pop();
-
-              setTimeRangeInputs(prev.min, prev.max);
-
-              suppressAfterSetExtremes = true;
-              chart.xAxis[0].setExtremes(prev.min, prev.max, true, false, { trigger: "internal" });
-              suppressAfterSetExtremes = false;
-
-              const from = new Date(prev.min);
-              const to = new Date(prev.max);
-
-              chart.series.forEach(function (s) {
-                if (!s.visible) return;
-                fetchData(s, from, to);
-              });
-
-              updateYAxisRangesAndRedraw();
-            }
-
-            // WICHTIG: Highcharts-default Reset wird verhindert -> Button selbst entfernen
-            if (chart && chart.resetZoomButton) {
-              chart.resetZoomButton.destroy();
-              chart.resetZoomButton = null;
-            }
-
-            return false; // Default-Reset verhindern (sonst Drift möglich)
-          }
-
-          // Zoom-In per Drag: e.xAxis[0].min/max vorhanden
-          if (liveMode) return false;
-          if (!e || !e.xAxis || !e.xAxis.length) return;
-
-          const ax = e.xAxis[0];
-          if (typeof ax.min !== "number" || typeof ax.max !== "number") return;
-
-          // PREV-Bereich merken (aktueller Extremes vor dem Zoom)
-          const cur = chart.xAxis[0].getExtremes();
-          zoomStack.push({ min: cur.min, max: cur.max });
-
-          // Inputs setzen + Daten laden passiert in afterSetExtremes
-          // -> wir lassen Highcharts den Zoom anwenden (return true/undefined)
         }
       }
     },
 
-    title: { text: "T{Anlage}", useHTML: true },
+    boost: { enabled: true, useGPUTranslations: true },
+
+    title: { text: chartTitle, useHTML: true },
     time: { useUTC: false },
     legend: { enabled: false },
 
@@ -925,20 +1696,10 @@ function drawChart() {
           if (suppressAfterSetExtremes) return;
           if (!e || typeof e.min !== "number" || typeof e.max !== "number") return;
 
-          // Live-Modus: Zoom ignorieren
-          if (liveMode) return;
-
           setTimeRangeInputs(e.min, e.max);
 
-          const from = new Date(e.min);
-          const to = new Date(e.max);
-
-          chart.series.forEach(function (s) {
-            if (!s.visible) return;
-            fetchData(s, from, to);
-          });
-
-          updateYAxisRangesAndRedraw();
+          // User-Zoom / Navigator: sauber über reloadVisible (wartet auf Daten -> redraw)
+          reloadVisible({ setExtremes: false, updateYAxis: !liveMode, redrawOnce: true });
         }
       }
     },
@@ -949,6 +1710,7 @@ function drawChart() {
 
     plotOptions: {
       series: {
+        boostThreshold: 2000,
         label: { enabled: true, connectorAllowed: false, style: { fontSize: "14px" } },
         marker: { enabled: false }
       }
@@ -977,24 +1739,67 @@ function drawChart() {
     series: []
   });
 
-  const tr = getTimeRange();
+  var tr = getTimeRange();
+
   suppressAfterSetExtremes = true;
-  chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+  chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), false, false, { trigger: "internal" });
   suppressAfterSetExtremes = false;
 
-  updateYAxisRangesAndRedraw();
+  // Initial
+  reloadVisible({ setExtremes: false, updateYAxis: true, redrawOnce: true });
 }
 
+
 // ============================================================
-// 11) SORT LADEN (Single-Plant)
-// q.SortierVariable liefert bei dir ein Array(23) mit {1:"Name"}
+// 12) SORT LADEN (Multi/Single/Legacy) und Start
 // ============================================================
+
 function loadSortThenStart() {
   function start() {
     drawChart();
     wireButtons();
   }
 
+  // Multi: pro Plant SortOrder
+  if (isMultiPlant) {
+    let remaining = defaultPlants.length;
+
+    defaultPlants.forEach(function (p) {
+      const sv = sortVarsMulti[p];
+      if (!sv) {
+        sortMap[p] = null;
+        remaining--;
+        if (remaining === 0) start();
+        return;
+      }
+
+      webMI.data.read(sv, function (e) {
+        sortMap[p] = e && e.value != null ? e.value : null;
+        remaining--;
+        if (remaining === 0) start();
+      });
+    });
+
+    return;
+  }
+
+  // Single neues Schema
+  if (singlePlant) {
+    if (!sortVarSingle) {
+      sortMap[singlePlant] = null;
+      start();
+      return;
+    }
+
+    webMI.data.read(sortVarSingle, function (e) {
+      sortMap[singlePlant] = e && e.value != null ? e.value : null;
+      start();
+    });
+
+    return;
+  }
+
+  // Legacy: q.SortierVariable -> sortList
   if (!q.SortierVariable) {
     sortList = null;
     start();
@@ -1005,20 +1810,11 @@ function loadSortThenStart() {
     const raw = e && e.value != null ? e.value : null;
     const parsed = parseMaybeJson(raw);
 
-    if (Array.isArray(parsed)) {
-      sortList = parsed;
-      start();
-      return;
-    }
+    if (Array.isArray(parsed)) { sortList = parsed; start(); return; }
 
-    // falls jemand irgendwann JSON-String speichert
     if (typeof raw === "string") {
       const p2 = parseMaybeJson(raw);
-      if (Array.isArray(p2)) {
-        sortList = p2;
-        start();
-        return;
-      }
+      if (Array.isArray(p2)) { sortList = p2; start(); return; }
     }
 
     sortList = null;
@@ -1026,50 +1822,100 @@ function loadSortThenStart() {
   });
 }
 
-// ============================================================
-// 12) BUTTONS (Load + Live)
-// ============================================================
-function wireButtons() {
-  const loadBtn = document.getElementById("loadBtn");
-  if (loadBtn) loadBtn.addEventListener("click", reloadVisible);
 
-  const liveBtn = document.getElementById("liveBtn");
+// ============================================================
+// 13) BUTTONS (Load + Live + Shift Left/Right)
+// ============================================================
+
+function wireButtons() {
+  var loadBtn = document.getElementById("loadBtn");
+  if (loadBtn) {
+    loadBtn.addEventListener("click", function () {
+      reloadVisible({ setExtremes: true, updateYAxis: true, redrawOnce: true });
+    });
+  }
+
+  // ----------------------------------------------------------
+  // SHIFT BUTTONS: Zeitraum verschieben (gleiches Fenster)
+  // - LiveMode: optional blocken (empfohlen), damit Live nicht "gegenarbeitet"
+  // ----------------------------------------------------------
+
+  function shiftRange(direction) {
+    // direction: -1 (left) / +1 (right)
+    if (!chart) return;
+
+    // Wenn Live an ist: entweder blocken oder Live kurz aus
+    // (Hier: blocken -> simpel & stabil)
+    if (liveMode) return;
+
+    var tr = getTimeRange();
+    var fromMs = tr.from.getTime();
+    var toMs = tr.to.getTime();
+    if (isNaN(fromMs) || isNaN(toMs)) return;
+
+    var span = toMs - fromMs;
+    if (span <= 0) return;
+
+    var newFrom = fromMs + (direction * span);
+    var newTo = toMs + (direction * span);
+
+    // Inputs setzen
+    setTimeRangeInputs(newFrom, newTo);
+
+    // Neu laden (setzt extremes + lädt Daten)
+    reloadVisible({ setExtremes: true, updateYAxis: true, redrawOnce: true });
+  }
+
+  var shiftLeftBtn = document.getElementById("shiftLeftBtn");
+  if (shiftLeftBtn) {
+    shiftLeftBtn.addEventListener("click", function () {
+      shiftRange(-1);
+    });
+  }
+
+  var shiftRightBtn = document.getElementById("shiftRightBtn");
+  if (shiftRightBtn) {
+    shiftRightBtn.addEventListener("click", function () {
+      shiftRange(+1);
+    });
+  }
+
+  // ----------------------------------------------------------
+  // LIVE BUTTON (wie bei dir, simple tick skip if busy)
+  // ----------------------------------------------------------
+
+  var liveBtn = document.getElementById("liveBtn");
   if (!liveBtn) return;
 
   liveBtn.addEventListener("click", function () {
     liveMode = !liveMode;
 
-    const fromEl = document.getElementById("startTime");
-    const toEl = document.getElementById("endTime");
+    var fromEl = document.getElementById("startTime");
+    var toEl = document.getElementById("endTime");
 
     if (fromEl) fromEl.readOnly = liveMode;
     if (toEl) toEl.readOnly = liveMode;
 
     liveBtn.textContent = liveMode ? "T{Live}" : "T{Historie}";
 
-    // Live toggling: Zoom-Stack leeren + ResetButton entfernen
-    zoomStack = [];
-    if (chart && chart.resetZoomButton) {
-      chart.resetZoomButton.destroy();
-      chart.resetZoomButton = null;
-    }
-
     if (liveMode) {
       if (liveTimer) clearInterval(liveTimer);
+      liveTimer = null;
 
-      const tr = getTimeRange();
-      const diff = tr.to - tr.from;
-      if (!isNaN(diff) && diff > 30 * 1000) liveWindowMs = diff;
-      else liveWindowMs = 3600 * 1000;
+      var tr = getTimeRange();
+      var diff = tr.to - tr.from;
+      liveWindowMs = (!isNaN(diff) && diff > 30 * 1000) ? diff : (3600 * 1000);
 
-      const tick = function () {
-        const now2 = new Date();
-        const from2 = new Date(now2.getTime() - liveWindowMs);
+      var tick = function () {
+        if (liveReloadBusy) return;
+
+        var now2 = new Date();
+        var from2 = new Date(now2.getTime() - liveWindowMs);
 
         if (fromEl) fromEl.value = toLocalDatetimeString(from2);
         if (toEl) toEl.value = toLocalDatetimeString(now2);
 
-        reloadVisible();
+        reloadVisible({ setExtremes: true, updateYAxis: false, redrawOnce: true });
       };
 
       tick();
@@ -1077,13 +1923,18 @@ function wireButtons() {
     } else {
       if (liveTimer) clearInterval(liveTimer);
       liveTimer = null;
+
+      liveReloadBusy = false;
+
+      reloadVisible({ setExtremes: true, updateYAxis: true, redrawOnce: true });
     }
   });
 }
 
 // ============================================================
-// 13) START
+// 14) START
 // ============================================================
+
 webMI.libraryLoader.load(
   [
     "highcharts/highcharts.js",
@@ -1092,7 +1943,8 @@ webMI.libraryLoader.load(
     "highcharts/modules/offline-exporting.js",
     "highcharts/modules/series-label.js",
     "highcharts/modules/datagrouping.js",
-    "highcharts/themes/grid-light.js"
+    "highcharts/themes/grid-light.js",
+    "highcharts/modules/boost.js"
   ],
   [],
   function () {
@@ -1107,9 +1959,9 @@ webMI.libraryLoader.load(
       if (startEl) startEl.value = toLocalDatetimeString(past);
       if (endEl) endEl.value = toLocalDatetimeString(now);
 
-      // Sort zuerst laden, dann starten
       loadSortThenStart();
     });
   }
 );
-
+]]></script>
+</svg>
