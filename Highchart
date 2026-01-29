@@ -1,5 +1,12 @@
+const manualDefinitions = [
+];
+
 // ============================================================
-// 20260129 - 2  Multi-Plant Highcharts (Zoom-Range + NoData-Fallback + RAW/10m Average + Sort per Plant)
+// 20260129 - 3  Single-Plant Highcharts
+// - Zoom per Mausbereich (drag) + stabiler Reset-Zoom (ohne Drift)
+// - NoData-Fallback (±4 Wochen Randpunkte + Current-Value Linie)
+// - Aggregation: RAW < 1 Woche, sonst 10m Average (Tagesprogramm/Status/Zustand immer RAW)
+// - Sortierung der Gruppen per q.SortierVariable (Array wie bei dir: [{1:"Fermenter_F1"}, ...])
 // ============================================================
 
 let chart;
@@ -7,8 +14,8 @@ let liveMode = false;
 let liveTimer = null;
 let language = null;
 
-// sortMap[plant] = SortOrder (Array) oder null
-let sortMap = {};
+// SortOrder (Array) oder null
+let sortList = null;
 
 // Rolling-Window im Live-Modus (Default 1h)
 let liveWindowMs = 3600 * 1000;
@@ -19,40 +26,32 @@ const q = webMI.query;
 const browseAll = true;
 const configAddr = "AGENT.OBJECTS.System.Diagramm.Konfiguriert";
 
-// Optional: manuelle Serien (werden NICHT in Config geschrieben)
-const manualDefinitions = [];
-
 // Intern
 let suppressAfterSetExtremes = false;
+
+// Zoom-Stack: verhindert "Drift" beim ResetZoom
+// Wir pushen bei jedem Zoom (selection) den PREV-Bereich,
+// und beim Reset holen wir den letzten Bereich wieder raus.
+let zoomStack = [];
 
 // ============================================================
 // 1) HELFER
 // ============================================================
 function toLocalDatetimeString(date) {
-  function pad(n) {
-    return n.toString().padStart(2, "0");
-  }
+  function pad(n) { return n.toString().padStart(2, "0"); }
   return (
-    date.getFullYear() +
-    "-" +
-    pad(date.getMonth() + 1) +
-    "-" +
-    pad(date.getDate()) +
-    "T" +
-    pad(date.getHours()) +
-    ":" +
-    pad(date.getMinutes()) +
-    ":" +
+    date.getFullYear() + "-" +
+    pad(date.getMonth() + 1) + "-" +
+    pad(date.getDate()) + "T" +
+    pad(date.getHours()) + ":" +
+    pad(date.getMinutes()) + ":" +
     pad(date.getSeconds())
   );
 }
 
 function parseConfig(raw) {
-  try {
-    return typeof raw === "string" ? JSON.parse(raw) : raw;
-  } catch (e) {
-    return null;
-  }
+  try { return typeof raw === "string" ? JSON.parse(raw) : raw; }
+  catch (e) { return null; }
 }
 
 function parseMaybeJson(v) {
@@ -61,11 +60,7 @@ function parseMaybeJson(v) {
     const s = v.trim();
     if (!s) return v;
     if (s[0] === "{" || s[0] === "[") {
-      try {
-        return JSON.parse(s);
-      } catch (e) {
-        return v;
-      }
+      try { return JSON.parse(s); } catch (e) { return v; }
     }
   }
   return v;
@@ -116,18 +111,16 @@ function normalizeResultToXY(res) {
     data.push([ts, val]);
   }
 
-  data.sort(function (a, b) {
-    return a[0] - b[0];
-  });
+  data.sort(function (a, b) { return a[0] - b[0]; });
 
   // dedupe gleiche timestamps
   const out = [];
-  for (let i = 0; i < data.length; i++) {
-    if (out.length === 0) out.push(data[i]);
+  for (let j = 0; j < data.length; j++) {
+    if (out.length === 0) out.push(data[j]);
     else {
       const last = out[out.length - 1];
-      if (data[i][0] === last[0]) last[1] = data[i][1];
-      else out.push(data[i]);
+      if (data[j][0] === last[0]) last[1] = data[j][1];
+      else out.push(data[j]);
     }
   }
 
@@ -147,52 +140,12 @@ function setTimeRangeInputs(fromMs, toMs) {
   if (toEl) toEl.value = toLocalDatetimeString(new Date(toMs));
 }
 
-// ============================================================
-// 2) MULTI-PLANT: Plant aus Adresse erkennen + Startadressen
-//    Unterstützt:
-//      - AGENT.OBJECTS.Anlage.... (ohne Plant-Segment) -> plant="Anlage"
-//      - AGENT.OBJECTS.<PLANT>.Anlage.... -> plant="<PLANT>"
-//      - AGENT.OBJECTS.System.Tagesprogramm.... -> plant="System"
-//      - AGENT.OBJECTS.<PLANT>.System.Tagesprogramm.... -> plant="<PLANT>"
-// ============================================================
-function detectPlantFromAddress(addr) {
-  if (typeof addr !== "string") return "Anlage";
-  const parts = addr.split(".");
-  // Erwartet: AGENT.OBJECTS.[maybePlant].Anlage...
-  if (parts.length < 3) return "Anlage";
-  if (parts[0] !== "AGENT" || parts[1] !== "OBJECTS") return "Anlage";
-
-  // Ohne Plant: AGENT.OBJECTS.Anlage....
-  if (parts[2] === "Anlage" || parts[2] === "System") {
-    return parts[2] === "System" ? "System" : "Anlage";
-  }
-
-  // Mit Plant: AGENT.OBJECTS.<Plant>.Anlage...
-  return parts[2];
-}
-
 function isTagesprogrammAddress(address) {
-  // mit oder ohne Plant-Segment
-  // AGENT.OBJECTS.System.Tagesprogramm....
-  // AGENT.OBJECTS.<PLANT>.System.Tagesprogramm....
-  return /^AGENT\.OBJECTS\.(?:[^.]+\.)?System\.Tagesprogramm\./i.test(address);
-}
-
-function makeAnlageRoot(plant) {
-  // plant === "Anlage" bedeutet "ohne Plant-Segment"
-  if (!plant || plant === "Anlage") return "AGENT.OBJECTS.Anlage";
-  return "AGENT.OBJECTS." + plant + ".Anlage";
-}
-
-function makeTagesprogrammRoot(plant) {
-  if (!plant || plant === "System") return "AGENT.OBJECTS.System.Tagesprogramm";
-  // mit Plant-Segment:
-  // AGENT.OBJECTS.<PLANT>.System.Tagesprogramm
-  return "AGENT.OBJECTS." + plant + ".System.Tagesprogramm";
+  return /^AGENT\.OBJECTS\.System\.Tagesprogramm\./i.test(address);
 }
 
 // ============================================================
-// 3) BROWSE HELPERS + Multi-Plant Discovery
+// 2) BROWSE HELPERS (Single-Plant)
 // ============================================================
 function walkAny(nodeOrMap, out, predicate) {
   if (!nodeOrMap) return;
@@ -200,7 +153,7 @@ function walkAny(nodeOrMap, out, predicate) {
   if (
     typeof nodeOrMap === "object" &&
     (Object.prototype.hasOwnProperty.call(nodeOrMap, "name") ||
-      Object.prototype.hasOwnProperty.call(nodeOrMap, "childs"))
+     Object.prototype.hasOwnProperty.call(nodeOrMap, "childs"))
   ) {
     const name = nodeOrMap.name;
     if (name && predicate(name)) out.push(name);
@@ -218,41 +171,10 @@ function walkAny(nodeOrMap, out, predicate) {
   }
 }
 
-function collectPlantsFromAgentObjects(treeData) {
-  // Wir sammeln Plant-Namen aus Knoten:
-  // - AGENT.OBJECTS.<PLANT>.Anlage
-  // - AGENT.OBJECTS.<PLANT>.System
-  // (Je nach BrowseNodes-Struktur können auch Leaf-Namen kommen – wir filtern per Regex)
-  const out = [];
-  const rx = /^AGENT\.OBJECTS\.([^.]+)\.(Anlage|System)$/i;
-
-  function want(addr) {
-    if (typeof addr !== "string") return false;
-    const m = addr.match(rx);
-    if (!m) return false;
-    const plant = m[1];
-    // Standardknoten "System"/"Anlage" nicht als Plant zählen
-    if (!plant) return false;
-    if (plant.toLowerCase() === "system") return false;
-    if (plant.toLowerCase() === "anlage") return false;
-    out.push(plant);
-    return false;
-  }
-
-  walkAny(treeData, [], want);
-
-  // dedupe
-  const uniq = {};
-  for (let i = 0; i < out.length; i++) uniq[out[i]] = true;
-  return Object.keys(uniq);
-}
-
 function collectAnlageIOs(treeData) {
   const out = [];
-  // ohne Plant: AGENT.OBJECTS.Anlage.<Group>.<Var>.IOs....
-  // mit Plant:  AGENT.OBJECTS.<PLANT>.Anlage.<Group>.<Var>.IOs....
   const rx =
-    /^AGENT\.OBJECTS\.(?:[^.]+\.)?Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+    /^AGENT\.OBJECTS\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
 
   function want(addr) {
     return typeof addr === "string" && rx.test(addr);
@@ -263,10 +185,8 @@ function collectAnlageIOs(treeData) {
 
 function collectTagesprogramm(treeData) {
   const out = [];
-  // ohne Plant: AGENT.OBJECTS.System.Tagesprogramm.<A>.<B>.Automatischer_Eintrag.Heute.IW_Menge_Tag
-  // mit Plant:  AGENT.OBJECTS.<PLANT>.System.Tagesprogramm....
   const rx =
-    /^AGENT\.OBJECTS\.(?:[^.]+\.)?System\.Tagesprogramm\.[^.]+\.[^.]+\.Automatischer_Eintrag\.Heute\.IW_Menge_Tag$/i;
+    /^AGENT\.OBJECTS\.System\.Tagesprogramm\.[^.]+\.Heute\.IW_Menge_Tag$/i;
 
   function want(addr) {
     return typeof addr === "string" && rx.test(addr);
@@ -276,14 +196,11 @@ function collectTagesprogramm(treeData) {
 }
 
 // ============================================================
-// 4) SERIES DEFINITION (Multi-Plant + Sort/Legend-ready)
+// 3) SERIES DEFINITION
 // ============================================================
 function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
   const parts = addr.split(".");
 
-  const plant = detectPlantFromAddress(addr);
-
-  // Standard: name = vorletzte/nahe IOs-Knoten
   let name = parts[parts.length - 3] || addr;
   let group = groupOverride || "Ungruppiert";
   let yAxis = 0;
@@ -292,16 +209,10 @@ function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
   let subgroup = null;
 
   // Anlage:
-  // ohne Plant: AGENT.OBJECTS.Anlage.<Group>.<Var>.IOs.<...>
-  // mit Plant:  AGENT.OBJECTS.<PLANT>.Anlage.<Group>.<Var>.IOs.<...>
-  if (/^AGENT\.OBJECTS\.(?:[^.]+\.)?Anlage\./i.test(addr)) {
-    // Index-Shift: mit Plant ist <Group> bei parts[4], ohne Plant bei parts[3]
-    const hasPlant = (parts[2] !== "Anlage" && parts[2] !== "System");
-    const idxGroup = hasPlant ? 4 : 3;
-    const idxVar = hasPlant ? 5 : 4;
-
-    group = groupOverride || parts[idxGroup] || "Anlage";
-    name = parts[idxVar] || "?";
+  // AGENT.OBJECTS.Anlage.<Group>.<Var>.IOs.<...>
+  if (/^AGENT\.OBJECTS\.Anlage\./i.test(addr)) {
+    group = groupOverride || parts[3] || "Anlage";
+    name = parts[4] || "?";
 
     if (/\.Zustand$|\.Status$/i.test(addr)) {
       yAxis = 1;
@@ -310,36 +221,16 @@ function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
       yAxis = 6;
       step = true;
     } else {
-      // ...Intern.Typ muss den richtigen Prefix treffen:
-      // ohne Plant: AGENT.OBJECTS.Anlage.<Group>.<Var>.Intern.Typ  => parts[0..4]
-      // mit Plant:  AGENT.OBJECTS.<PLANT>.Anlage.<Group>.<Var>.Intern.Typ => parts[0..5]
-      const baseCount = hasPlant ? 6 : 5;
-      tryDetectType = parts.slice(0, baseCount).join(".") + ".Intern.Typ";
+      // AGENT.OBJECTS.Anlage.<Group>.<Var>.Intern.Typ
+      tryDetectType = parts.slice(0, 5).join(".") + ".Intern.Typ";
     }
   }
-
   // Tagesprogramm:
   else if (isTagesprogrammAddress(addr)) {
     group = groupOverride || "Tagesprogramm";
-    // Name ist bei deinem Pattern meist ein Segment weiter hinten, aber plant/no-plant verschiebt
-    // Wir nehmen ein robustes Segment in der Nähe:
     // ...System.Tagesprogramm.<A>.<B>.Automatischer_Eintrag...
-    // A liegt:
-    // ohne Plant: parts[4]
-    // mit Plant:  parts[5]
-    let tpName = "";
-    if (parts.length >= 6) {
-      // Suche den Index von "Tagesprogramm"
-      let idxTP = -1;
-      for (let i = 0; i < parts.length; i++) {
-        if (String(parts[i]).toLowerCase() === "tagesprogramm") {
-          idxTP = i;
-          break;
-        }
-      }
-      if (idxTP !== -1 && parts[idxTP + 2]) tpName = parts[idxTP + 2];
-      else tpName = parts[5] || parts[4] || "";
-    }
+    // A liegt bei parts[4]
+    let tpName = parts[4] || "";
     name = String(tpName).replace(/_/g, " ").replace(/zu/g, "->");
   }
 
@@ -359,7 +250,7 @@ function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
     step: step,
     visible: visible,
     tryDetectType: tryDetectType,
-    plant: plant
+    plant: "Anlage"
   };
 }
 
@@ -410,7 +301,7 @@ function saveCurrentConfig() {
 }
 
 // ============================================================
-// 5) AGGREGATION (wie im anderen Code: RAW < 1 Woche, sonst 10m Average)
+// 4) AGGREGATION: RAW < 1 Woche, sonst 10m Average
 //    - Tagesprogramm: RAW
 //    - Status/Zustand: RAW
 // ============================================================
@@ -430,7 +321,7 @@ function getAggregationSimple(from, to, address) {
 }
 
 // ============================================================
-// 6) FETCH DATA (NoData-Fallback + Randpunkte ±4 Wochen + Current Value)
+// 5) FETCH DATA (NoData-Fallback + Randpunkte ±4 Wochen + Current Value)
 // ============================================================
 function fetchData(series, from, to) {
   const address = series.options && series.options.address;
@@ -448,9 +339,7 @@ function fetchData(series, from, to) {
   const ffToMs = toMs + lookMs;
 
   function qf(filter, cb) {
-    webMI.data.queryFilter(filter, function (res) {
-      cb(res);
-    });
+    webMI.data.queryFilter(filter, function (res) { cb(res); });
   }
 
   function buildMainFilter() {
@@ -468,7 +357,6 @@ function fetchData(series, from, to) {
         filter.unit = ["v:" + agg.unit];
       }
     }
-
     return filter;
   }
 
@@ -501,18 +389,12 @@ function fetchData(series, from, to) {
   }
 
   function tryDrawWithCurrentValueIfNeeded(doneIfNotPossible) {
-    if (!nowIsInsideRange()) {
-      doneIfNotPossible();
-      return;
-    }
+    if (!nowIsInsideRange()) { doneIfNotPossible(); return; }
 
     webMI.data.read(address, function (e) {
       const v = e && e.value != null ? e.value : null;
       const cur = parseAnyNumber(v);
-      if (isNaN(cur)) {
-        doneIfNotPossible();
-        return;
-      }
+      if (isNaN(cur)) { doneIfNotPossible(); return; }
       applyData([[fromMs, cur], [toMs, cur]]);
     });
   }
@@ -581,16 +463,14 @@ function fetchData(series, from, to) {
         }
 
         // C) Gar nichts gefunden -> wenn jetzt im Fenster: aktuelle Linie, sonst leer
-        tryDrawWithCurrentValueIfNeeded(function () {
-          applyData([]);
-        });
+        tryDrawWithCurrentValueIfNeeded(function () { applyData([]); });
       });
     });
   });
 }
 
 // ============================================================
-// 7) Y-ACHSE (FIX)
+// 6) Y-ACHSE (FIX)
 // ============================================================
 function updateYAxisRangesAndRedraw() {
   if (!chart) return;
@@ -620,10 +500,14 @@ function updateYAxisRangesAndRedraw() {
 }
 
 // ============================================================
-// 8) RELOAD VISIBLE (Range aus Inputs)
+// 7) RELOAD VISIBLE (Range aus Inputs) + ZoomStack reset
 // ============================================================
 function reloadVisible() {
   if (!chart) return;
+
+  // Wenn User "Laden" klickt: Zoom-Historie zurücksetzen,
+  // damit ResetZoom sauber nur innerhalb der aktuellen Session arbeitet.
+  zoomStack = [];
 
   const tr = getTimeRange();
 
@@ -637,10 +521,16 @@ function reloadVisible() {
   });
 
   updateYAxisRangesAndRedraw();
+
+  // Falls ResetZoom Button existiert: weg damit (sonst bleibt er nach "Laden" evtl. stehen)
+  if (chart && chart.resetZoomButton) {
+    chart.resetZoomButton.destroy();
+    chart.resetZoomButton = null;
+  }
 }
 
 // ============================================================
-// 9) SERIEN AUFBAU + LEGENDE (MULTI-PLANT + Sort pro Plant)
+// 8) SERIEN AUFBAU + LEGENDE + Sortierung per SortOrder
 // ============================================================
 function addDiscoveredSeries(addressDefs, opts) {
   const afterAddSave = opts && typeof opts.afterAddSave === "boolean" ? opts.afterAddSave : false;
@@ -664,7 +554,7 @@ function addDiscoveredSeries(addressDefs, opts) {
         subgroup: def.subgroup || null,
         step: isStatus ? "left" : def.step ? "left" : undefined,
         dataType: def.dataType || "value",
-        plant: def.plant || detectPlantFromAddress(def.address)
+        plant: "Anlage"
       },
       false
     );
@@ -700,7 +590,7 @@ function addDiscoveredSeries(addressDefs, opts) {
             group: def.group,
             subgroup: def.subgroup || null,
             step: def.step ? "left" : undefined,
-            plant: def.plant || detectPlantFromAddress(def.address)
+            plant: "Anlage"
           },
           false
         );
@@ -721,7 +611,7 @@ function addDiscoveredSeries(addressDefs, opts) {
           group: def.group,
           subgroup: def.subgroup || null,
           step: def.step ? "left" : undefined,
-          plant: def.plant || detectPlantFromAddress(def.address)
+          plant: "Anlage"
         },
         false
       );
@@ -755,230 +645,172 @@ function buildLegend() {
 
   container.innerHTML = "";
 
-  // plants[plant][group][sub] = series[]
-  const plants = {};
+  // groups[group][sub] = series[]
+  const groups = {};
   chart.series.forEach(function (s) {
-    const plant = (s.options && s.options.plant) ? s.options.plant : "Anlage";
     const g = (s.options && s.options.group) ? s.options.group : "Ungruppiert";
     const sub = (s.options && s.options.subgroup) ? s.options.subgroup : null;
 
-    if (!plants[plant]) plants[plant] = {};
-    if (!plants[plant][g]) plants[plant][g] = {};
-    if (!plants[plant][g][sub]) plants[plant][g][sub] = [];
-    plants[plant][g][sub].push(s);
+    if (!groups[g]) groups[g] = {};
+    if (!groups[g][sub]) groups[g][sub] = [];
+    groups[g][sub].push(s);
   });
 
-  const sortedPlants = Object.keys(plants).sort(function (a, b) {
+  function getSortIndex(name) {
+    if (!Array.isArray(sortList) || !sortList.length) return -1;
+    for (let i = 0; i < sortList.length; i++) {
+      const item = sortList[i];
+      if (!item) continue;
+      if (item["1"] === name) return i;
+      if (item[1] === name) return i;
+      if (item.name === name) return i;
+      const vals = Object.values(item);
+      if (vals && vals.length && vals[0] === name) return i;
+    }
+    return -1;
+  }
+
+  const allGroupNames = Object.keys(groups);
+  const hasAllgemein = allGroupNames.indexOf("Allgemein") !== -1;
+  const hasTagesprogramm = allGroupNames.indexOf("Tagesprogramm") !== -1;
+
+  const middle = allGroupNames.filter(function (g) {
+    if (g === "Allgemein") return false;
+    if (g === "Tagesprogramm") return false;
+    return true;
+  });
+
+  middle.sort(function (a, b) {
+    const ia = getSortIndex(a);
+    const ib = getSortIndex(b);
+
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
     return a.localeCompare(b);
   });
 
-  sortedPlants.forEach(function (plant) {
-    const plantDiv = top.document.createElement("div");
-    plantDiv.style.fontWeight = "bold";
-    plantDiv.style.cursor = "pointer";
-    plantDiv.style.fontSize = "16px";
-    plantDiv.style.marginTop = "12px";
-    plantDiv.style.marginBottom = "4px";
-    plantDiv.style.color = "#222";
+  const groupNames = [];
+  if (hasAllgemein) groupNames.push("Allgemein");
+  groupNames.push.apply(groupNames, middle);
+  if (hasTagesprogramm) groupNames.push("Tagesprogramm");
 
-    // Übersetzung optional (wenn vorhanden)
+  groupNames.forEach(function (gName, idx) {
+    if (idx > 0) {
+      const hr = top.document.createElement("hr");
+      hr.style.border = "0";
+      hr.style.borderTop = "1px solid #444";
+      hr.style.margin = "10px 0";
+      container.appendChild(hr);
+    }
+
+    const header = top.document.createElement("div");
+    header.style.fontWeight = "bold";
+    header.style.marginTop = "10px";
+    header.style.cursor = "pointer";
+    header.style.fontSize = "13px";
+
+    const displayName = String(gName).replace(/_/g, " ");
+
     try {
       webMI.data.call(
         "Standard_elpo",
-        { Funktion: "Translate", Text: plant, Sprache: language },
-        function (resp) {
-          plantDiv.textContent = resp && resp.result ? resp.result : plant;
-        }
+        { Funktion: "Translate", Text: displayName, Sprache: language },
+        function (resp) { header.textContent = resp && resp.result ? resp.result : displayName; }
       );
     } catch (e) {
-      plantDiv.textContent = plant;
+      header.textContent = displayName;
     }
 
-    container.appendChild(plantDiv);
+    container.appendChild(header);
 
-    const plantBody = top.document.createElement("div");
-    plantBody.style.marginLeft = "8px";
-    plantBody.style.display = "block";
-    container.appendChild(plantBody);
+    const body = top.document.createElement("div");
+    body.style.marginLeft = "8px";
+    body.style.display = "none";
+    container.appendChild(body);
 
-    plantDiv.addEventListener("click", function () {
-      plantBody.style.display = plantBody.style.display === "none" ? "block" : "none";
+    const hasVisible = Object.values(groups[gName]).some(function (arr) {
+      return arr.some(function (s) { return s.visible; });
+    });
+    if (hasVisible) body.style.display = "block";
+
+    header.addEventListener("click", function () {
+      body.style.display = body.style.display === "none" ? "block" : "none";
     });
 
-    const groups = plants[plant];
-
-    // Sortliste pro Plant
-    const rawSort = parseMaybeJson(sortMap[plant]);
-    const sortList = Array.isArray(rawSort) ? rawSort : [];
-
-    function getSortIndex(name) {
-      if (!sortList.length) return -1;
-      for (let i = 0; i < sortList.length; i++) {
-        const item = sortList[i];
-        if (!item) continue;
-        if (item["1"] === name) return i;
-        if (item[1] === name) return i;
-        if (item.name === name) return i;
-        // fallback: erstes Value
-        const vals = Object.values(item);
-        if (vals && vals.length && vals[0] === name) return i;
-      }
-      return -1;
-    }
-
-    const allGroupNames = Object.keys(groups);
-    const hasAllgemein = allGroupNames.indexOf("Allgemein") !== -1;
-    const hasTagesprogramm = allGroupNames.indexOf("Tagesprogramm") !== -1;
-
-    const middle = allGroupNames.filter(function (g) {
-      if (g === "Allgemein") return false;
-      if (g === "Tagesprogramm") return false;
-      return true;
+    const subgroups = groups[gName];
+    const sortedSubs = Object.keys(subgroups).sort(function (a, b) {
+      if (a === "null") return -1;
+      if (b === "null") return 1;
+      return String(a).localeCompare(String(b));
     });
 
-    middle.sort(function (a, b) {
-      const ia = getSortIndex(a);
-      const ib = getSortIndex(b);
+    sortedSubs.forEach(function (sub) {
+      let targetContainer = body;
 
-      if (ia !== -1 && ib !== -1) return ia - ib;
-      if (ia !== -1) return -1;
-      if (ib !== -1) return 1;
-      return a.localeCompare(b);
-    });
+      if (sub && sub !== "null") {
+        const subHeader = top.document.createElement("div");
+        subHeader.style.fontStyle = "italic";
+        subHeader.style.marginLeft = "8px";
+        subHeader.style.cursor = "pointer";
+        subHeader.style.fontWeight = "bold";
+        subHeader.style.marginTop = "4px";
+        subHeader.style.fontSize = "12px";
+        subHeader.textContent = sub;
 
-    const groupNames = [];
-    if (hasAllgemein) groupNames.push("Allgemein");
-    groupNames.push.apply(groupNames, middle);
-    if (hasTagesprogramm) groupNames.push("Tagesprogramm");
+        const subBody = top.document.createElement("div");
+        subBody.style.marginLeft = "8px";
+        subBody.style.display = "none";
 
-    groupNames.forEach(function (gName, idx) {
-      if (idx > 0) {
-        const hr = top.document.createElement("hr");
-        hr.style.border = "0";
-        hr.style.borderTop = "1px solid #444";
-        hr.style.margin = "10px 0";
-        plantBody.appendChild(hr);
-      }
-
-      const header = top.document.createElement("div");
-      header.style.fontWeight = "bold";
-      header.style.marginTop = "10px";
-      header.style.cursor = "pointer";
-      header.style.fontSize = "13px";
-
-      const displayName = String(gName).replace(/_/g, " ");
-
-      try {
-        webMI.data.call(
-          "Standard_elpo",
-          { Funktion: "Translate", Text: displayName, Sprache: language },
-          function (resp) {
-            header.textContent = resp && resp.result ? resp.result : displayName;
-          }
-        );
-      } catch (e) {
-        header.textContent = displayName;
-      }
-
-      plantBody.appendChild(header);
-
-      const body = top.document.createElement("div");
-      body.style.marginLeft = "8px";
-      body.style.display = "none";
-      plantBody.appendChild(body);
-
-      const hasVisible = Object.values(groups[gName]).some(function (arr) {
-        return arr.some(function (s) {
-          return s.visible;
+        subHeader.addEventListener("click", function (e) {
+          e.stopPropagation();
+          subBody.style.display = subBody.style.display === "none" ? "block" : "none";
         });
-      });
-      if (hasVisible) body.style.display = "block";
 
-      header.addEventListener("click", function () {
-        body.style.display = body.style.display === "none" ? "block" : "none";
-      });
+        body.appendChild(subHeader);
+        body.appendChild(subBody);
+        targetContainer = subBody;
+      }
 
-      const subgroups = groups[gName];
-      const sortedSubs = Object.keys(subgroups).sort(function (a, b) {
-        if (a === "null") return -1;
-        if (b === "null") return 1;
-        return String(a).localeCompare(String(b));
-      });
+      const seriesList = subgroups[sub];
+      seriesList
+        .sort(function (a, b) { return a.name.localeCompare(b.name); })
+        .forEach(function (s) {
+          const row = top.document.createElement("div");
+          row.textContent = s.name;
+          row.style.cursor = "pointer";
+          row.style.padding = "2px 8px";
+          row.style.marginLeft = "8px";
+          row.style.color = s.visible ? s.color : "#666";
+          row.style.fontWeight = s.visible ? "bold" : "normal";
 
-      sortedSubs.forEach(function (sub) {
-        let targetContainer = body;
-
-        if (sub && sub !== "null") {
-          const subHeader = top.document.createElement("div");
-          subHeader.style.fontStyle = "italic";
-          subHeader.style.marginLeft = "8px";
-          subHeader.style.cursor = "pointer";
-          subHeader.style.fontWeight = "bold";
-          subHeader.style.marginTop = "4px";
-          subHeader.style.fontSize = "12px";
-          subHeader.textContent = sub;
-
-          const subBody = top.document.createElement("div");
-          subBody.style.marginLeft = "8px";
-          subBody.style.display = "none";
-
-          subHeader.addEventListener("click", function (e) {
+          row.addEventListener("click", function (e) {
             e.stopPropagation();
-            subBody.style.display = subBody.style.display === "none" ? "block" : "none";
+
+            const show = !s.visible;
+            s.setVisible(show, false);
+
+            row.style.fontWeight = show ? "bold" : "normal";
+            row.style.color = show ? s.color : "#666";
+
+            const tr = getTimeRange();
+            if (show) fetchData(s, tr.from, tr.to);
+
+            suppressAfterSetExtremes = true;
+            chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+            suppressAfterSetExtremes = false;
+
+            updateYAxisRangesAndRedraw();
           });
 
-          body.appendChild(subHeader);
-          body.appendChild(subBody);
-          targetContainer = subBody;
-        }
-
-        const seriesList = subgroups[sub];
-        seriesList
-          .sort(function (a, b) {
-            return a.name.localeCompare(b.name);
-          })
-          .forEach(function (s) {
-            const row = top.document.createElement("div");
-            row.textContent = s.name;
-            row.style.cursor = "pointer";
-            row.style.padding = "2px 8px";
-            row.style.marginLeft = "8px";
-            row.style.color = s.visible ? s.color : "#666";
-            row.style.fontWeight = s.visible ? "bold" : "normal";
-
-            row.addEventListener("click", function (e) {
-              e.stopPropagation();
-
-              const show = !s.visible;
-              s.setVisible(show, false);
-
-              row.style.fontWeight = show ? "bold" : "normal";
-              row.style.color = show ? s.color : "#666";
-
-              const tr = getTimeRange();
-
-              if (show) {
-                fetchData(s, tr.from, tr.to);
-              }
-
-              suppressAfterSetExtremes = true;
-              chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
-              suppressAfterSetExtremes = false;
-
-              updateYAxisRangesAndRedraw();
-            });
-
-            targetContainer.appendChild(row);
-          });
-      });
+          targetContainer.appendChild(row);
+        });
     });
   });
 }
 
 // ============================================================
-// 10) CONFIG/BROWSE LADEN (MULTI-PLANT)
-//     - Wenn Config ok -> daraus laden
-//     - Wenn leer/ungültig -> Multi-Plant BrowseNodes -> defs -> Config speichern
+// 9) CONFIG/BROWSE LADEN (Single-Plant)
 // ============================================================
 function loadFromConfigOrBrowse() {
   webMI.data.read(configAddr, function (ce) {
@@ -998,87 +830,86 @@ function loadFromConfigOrBrowse() {
       return;
     }
 
-    // 1) Wenn q.Plants vorhanden (CSV oder JSON Array), nutzen wir das.
-    //    Sonst: BrowseNodes("AGENT.OBJECTS") und Plants ableiten.
-    function parsePlantsFromQuery() {
-      if (!q.Plants) return null;
+    const allAddrs = [];
 
-      const v = parseMaybeJson(q.Plants);
-      if (Array.isArray(v)) {
-        return v.map(function (x) { return String(x).trim(); }).filter(Boolean);
-      }
+    webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS.Anlage" }, function (treeAnlage) {
+      allAddrs.push.apply(allAddrs, collectAnlageIOs(treeAnlage));
 
-      if (typeof q.Plants === "string") {
-        return q.Plants
-          .split(",")
-          .map(function (s) { return s.trim(); })
-          .filter(Boolean);
-      }
+      webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS.System.Tagesprogramm" }, function (treeTP) {
+        allAddrs.push.apply(allAddrs, collectTagesprogramm(treeTP));
 
-      return null;
-    }
-
-    function browseAllPlants(plants) {
-      // Wenn keine Plants gefunden: fallback auf "ohne Plant" (Anlage + System.Tagesprogramm)
-      if (!plants || !plants.length) plants = ["Anlage"];
-
-      const allAddrs = [];
-
-      function browsePlantAtIndex(i) {
-        if (i >= plants.length) {
-          const defs = allAddrs.map(function (addr) { return makeSeriesDefFromAddress(addr); });
-          addDiscoveredSeries(defs, { afterAddSave: true });
-          return;
-        }
-
-        const plant = plants[i];
-
-        const anlageRoot = makeAnlageRoot(plant);
-        const tpRoot = makeTagesprogrammRoot(plant);
-
-        webMI.data.call("BrowseNodes", { startAddress: anlageRoot }, function (treeAnlage) {
-          allAddrs.push.apply(allAddrs, collectAnlageIOs(treeAnlage));
-
-          webMI.data.call("BrowseNodes", { startAddress: tpRoot }, function (treeTP) {
-            allAddrs.push.apply(allAddrs, collectTagesprogramm(treeTP));
-            browsePlantAtIndex(i + 1);
-          });
-        });
-      }
-
-      browsePlantAtIndex(0);
-    }
-
-    const plantsFromQuery = parsePlantsFromQuery();
-    if (plantsFromQuery && plantsFromQuery.length) {
-      browseAllPlants(plantsFromQuery);
-      return;
-    }
-
-    // Auto-Plant discovery
-    webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS" }, function (treeObjects) {
-      const plants = collectPlantsFromAgentObjects(treeObjects);
-
-      // Wenn nichts erkannt wird, trotzdem "ohne Plant" browsen
-      browseAllPlants(plants && plants.length ? plants : ["Anlage"]);
+        const defs = allAddrs.map(function (addr) { return makeSeriesDefFromAddress(addr); });
+        addDiscoveredSeries(defs, { afterAddSave: true });
+      });
     });
   });
 }
 
 // ============================================================
-// 11) CHART (Zoom per Mausbereich + Reload Visible)
+// 10) CHART (Zoom per Drag + stabiler ResetZoom)
 // ============================================================
 function drawChart() {
   chart = top.Highcharts.chart(document.getElementById("container"), {
     chart: {
       style: { fontSize: "11px" },
 
-      // ZOOM per Drag (Zeitbereich wählen)
+      // Zoom per Drag
       zoomType: "x",
 
       events: {
         load: function () {
+          // neue Session -> zoomStack leeren
+          zoomStack = [];
           loadFromConfigOrBrowse();
+        },
+
+        selection: function (e) {
+          // Reset-Zoom (Button)
+          if (e && e.resetSelection) {
+            if (liveMode) return false;
+
+            if (zoomStack.length > 0) {
+              const prev = zoomStack.pop();
+
+              setTimeRangeInputs(prev.min, prev.max);
+
+              suppressAfterSetExtremes = true;
+              chart.xAxis[0].setExtremes(prev.min, prev.max, true, false, { trigger: "internal" });
+              suppressAfterSetExtremes = false;
+
+              const from = new Date(prev.min);
+              const to = new Date(prev.max);
+
+              chart.series.forEach(function (s) {
+                if (!s.visible) return;
+                fetchData(s, from, to);
+              });
+
+              updateYAxisRangesAndRedraw();
+            }
+
+            // WICHTIG: Highcharts-default Reset wird verhindert -> Button selbst entfernen
+            if (chart && chart.resetZoomButton) {
+              chart.resetZoomButton.destroy();
+              chart.resetZoomButton = null;
+            }
+
+            return false; // Default-Reset verhindern (sonst Drift möglich)
+          }
+
+          // Zoom-In per Drag: e.xAxis[0].min/max vorhanden
+          if (liveMode) return false;
+          if (!e || !e.xAxis || !e.xAxis.length) return;
+
+          const ax = e.xAxis[0];
+          if (typeof ax.min !== "number" || typeof ax.max !== "number") return;
+
+          // PREV-Bereich merken (aktueller Extremes vor dem Zoom)
+          const cur = chart.xAxis[0].getExtremes();
+          zoomStack.push({ min: cur.min, max: cur.max });
+
+          // Inputs setzen + Daten laden passiert in afterSetExtremes
+          // -> wir lassen Highcharts den Zoom anwenden (return true/undefined)
         }
       }
     },
@@ -1097,7 +928,6 @@ function drawChart() {
           // Live-Modus: Zoom ignorieren
           if (liveMode) return;
 
-          // Inputs übernehmen + sichtbare Serien neu laden (Aggregation RAW/10m via fetchData)
           setTimeRangeInputs(e.min, e.max);
 
           const from = new Date(e.min);
@@ -1156,69 +986,48 @@ function drawChart() {
 }
 
 // ============================================================
-// 12) SORT LADEN (MULTI-PLANT kompatibel)
-//     Erwartung:
-//       - q.SortierVariable leer -> keine Sortierung
-//       - q.SortierVariable liefert:
-//           a) Array (wie bisher) -> wird für ALLE Plants verwendet
-//           b) Objekt { "<Plant>": [...], "<Plant2>": [...] } -> pro Plant
+// 11) SORT LADEN (Single-Plant)
+// q.SortierVariable liefert bei dir ein Array(23) mit {1:"Name"}
 // ============================================================
-function loadSortMapThenStart() {
+function loadSortThenStart() {
   function start() {
     drawChart();
     wireButtons();
   }
 
   if (!q.SortierVariable) {
-    // keine Sortierung
-    sortMap = {};
+    sortList = null;
     start();
     return;
   }
 
   webMI.data.read(q.SortierVariable, function (e) {
-    const raw = e && e.value ? e.value : null;
+    const raw = e && e.value != null ? e.value : null;
     const parsed = parseMaybeJson(raw);
 
-    // Objekt pro Plant
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      sortMap = parsed;
-      start();
-      return;
-    }
-
-    // Array -> für alle Plants verwenden (wir setzen später sortMap[plant] = array, falls plant nicht vorhanden)
     if (Array.isArray(parsed)) {
-      sortMap = { "__default__": parsed };
+      sortList = parsed;
       start();
       return;
     }
 
-    // Fallback: nichts brauchbares
-    sortMap = {};
+    // falls jemand irgendwann JSON-String speichert
+    if (typeof raw === "string") {
+      const p2 = parseMaybeJson(raw);
+      if (Array.isArray(p2)) {
+        sortList = p2;
+        start();
+        return;
+      }
+    }
+
+    sortList = null;
     start();
   });
 }
 
-// Wenn plant-spezifisch nicht existiert, fallback auf __default__
-function getSortForPlant(plant) {
-  if (sortMap && sortMap[plant]) return sortMap[plant];
-  if (sortMap && sortMap["__default__"]) return sortMap["__default__"];
-  return null;
-}
-
-// Patch: buildLegend nutzt sortMap[plant] direkt – hier mappen wir on-the-fly in buildLegend:
-(function patchSortMapAccess() {
-  const _parseMaybeJson = parseMaybeJson;
-  parseMaybeJson = function (v) {
-    // falls v "undefined", aber default vorhanden -> default liefern
-    if (v == null) return v;
-    return _parseMaybeJson(v);
-  };
-})();
-
 // ============================================================
-// 13) BUTTONS (Load + Live)
+// 12) BUTTONS (Load + Live)
 // ============================================================
 function wireButtons() {
   const loadBtn = document.getElementById("loadBtn");
@@ -1237,6 +1046,13 @@ function wireButtons() {
     if (toEl) toEl.readOnly = liveMode;
 
     liveBtn.textContent = liveMode ? "T{Live}" : "T{Historie}";
+
+    // Live toggling: Zoom-Stack leeren + ResetButton entfernen
+    zoomStack = [];
+    if (chart && chart.resetZoomButton) {
+      chart.resetZoomButton.destroy();
+      chart.resetZoomButton = null;
+    }
 
     if (liveMode) {
       if (liveTimer) clearInterval(liveTimer);
@@ -1266,7 +1082,7 @@ function wireButtons() {
 }
 
 // ============================================================
-// 14) START
+// 13) START
 // ============================================================
 webMI.libraryLoader.load(
   [
@@ -1291,8 +1107,9 @@ webMI.libraryLoader.load(
       if (startEl) startEl.value = toLocalDatetimeString(past);
       if (endEl) endEl.value = toLocalDatetimeString(now);
 
-      // Sort zuerst laden, dann drawChart()
-      loadSortMapThenStart();
+      // Sort zuerst laden, dann starten
+      loadSortThenStart();
     });
   }
 );
+
