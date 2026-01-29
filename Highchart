@@ -1683,8 +1683,6 @@ function drawChart() {
       }
     },
 
-    boost: { enabled: true, useGPUTranslations: true },
-
     title: { text: chartTitle, useHTML: true },
     time: { useUTC: false },
     legend: { enabled: false },
@@ -1944,7 +1942,6 @@ webMI.libraryLoader.load(
     "highcharts/modules/series-label.js",
     "highcharts/modules/datagrouping.js",
     "highcharts/themes/grid-light.js",
-    "highcharts/modules/boost.js"
   ],
   [],
   function () {
