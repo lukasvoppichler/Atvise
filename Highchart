@@ -1,0 +1,1298 @@
+// ============================================================
+// 20260129 - 2  Multi-Plant Highcharts (Zoom-Range + NoData-Fallback + RAW/10m Average + Sort per Plant)
+// ============================================================
+
+let chart;
+let liveMode = false;
+let liveTimer = null;
+let language = null;
+
+// sortMap[plant] = SortOrder (Array) oder null
+let sortMap = {};
+
+// Rolling-Window im Live-Modus (Default 1h)
+let liveWindowMs = 3600 * 1000;
+
+const q = webMI.query;
+
+// Config
+const browseAll = true;
+const configAddr = "AGENT.OBJECTS.System.Diagramm.Konfiguriert";
+
+// Optional: manuelle Serien (werden NICHT in Config geschrieben)
+const manualDefinitions = [];
+
+// Intern
+let suppressAfterSetExtremes = false;
+
+// ============================================================
+// 1) HELFER
+// ============================================================
+function toLocalDatetimeString(date) {
+  function pad(n) {
+    return n.toString().padStart(2, "0");
+  }
+  return (
+    date.getFullYear() +
+    "-" +
+    pad(date.getMonth() + 1) +
+    "-" +
+    pad(date.getDate()) +
+    "T" +
+    pad(date.getHours()) +
+    ":" +
+    pad(date.getMinutes()) +
+    ":" +
+    pad(date.getSeconds())
+  );
+}
+
+function parseConfig(raw) {
+  try {
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (e) {
+    return null;
+  }
+}
+
+function parseMaybeJson(v) {
+  if (v == null) return v;
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return v;
+    if (s[0] === "{" || s[0] === "[") {
+      try {
+        return JSON.parse(s);
+      } catch (e) {
+        return v;
+      }
+    }
+  }
+  return v;
+}
+
+function parseAnyNumber(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "boolean") return v ? 1 : 0;
+
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true" || s === "on" || s === "ein" || s === "1") return 1;
+    if (s === "false" || s === "off" || s === "aus" || s === "0") return 0;
+    const n = parseFloat(s.replace(",", "."));
+    return isNaN(n) ? NaN : n;
+  }
+
+  if (v && typeof v === "object") {
+    if (typeof v.value === "number") return v.value;
+    if (typeof v.de === "string") return parseAnyNumber(v.de);
+    if (typeof v.en === "string") return parseAnyNumber(v.en);
+  }
+
+  return NaN;
+}
+
+function normalizeResultToXY(res) {
+  if (!res || !res.result) return [];
+
+  const data = [];
+  for (let i = 0; i < res.result.length; i++) {
+    const p = res.result[i];
+
+    let ts = p.timestamp;
+    if (typeof ts === "string") {
+      const parsed = Date.parse(ts);
+      ts = isNaN(parsed) ? null : parsed;
+    } else if (ts && typeof ts === "object" && typeof ts.getTime === "function") {
+      ts = ts.getTime();
+    } else if (typeof ts !== "number") {
+      ts = null;
+    }
+
+    const val = parseAnyNumber(p.value);
+    if (ts === null) continue;
+    if (isNaN(val)) continue;
+
+    data.push([ts, val]);
+  }
+
+  data.sort(function (a, b) {
+    return a[0] - b[0];
+  });
+
+  // dedupe gleiche timestamps
+  const out = [];
+  for (let i = 0; i < data.length; i++) {
+    if (out.length === 0) out.push(data[i]);
+    else {
+      const last = out[out.length - 1];
+      if (data[i][0] === last[0]) last[1] = data[i][1];
+      else out.push(data[i]);
+    }
+  }
+
+  return out;
+}
+
+function getTimeRange() {
+  const from = new Date(document.getElementById("startTime").value);
+  const to = new Date(document.getElementById("endTime").value);
+  return { from: from, to: to };
+}
+
+function setTimeRangeInputs(fromMs, toMs) {
+  const fromEl = document.getElementById("startTime");
+  const toEl = document.getElementById("endTime");
+  if (fromEl) fromEl.value = toLocalDatetimeString(new Date(fromMs));
+  if (toEl) toEl.value = toLocalDatetimeString(new Date(toMs));
+}
+
+// ============================================================
+// 2) MULTI-PLANT: Plant aus Adresse erkennen + Startadressen
+//    Unterstützt:
+//      - AGENT.OBJECTS.Anlage.... (ohne Plant-Segment) -> plant="Anlage"
+//      - AGENT.OBJECTS.<PLANT>.Anlage.... -> plant="<PLANT>"
+//      - AGENT.OBJECTS.System.Tagesprogramm.... -> plant="System"
+//      - AGENT.OBJECTS.<PLANT>.System.Tagesprogramm.... -> plant="<PLANT>"
+// ============================================================
+function detectPlantFromAddress(addr) {
+  if (typeof addr !== "string") return "Anlage";
+  const parts = addr.split(".");
+  // Erwartet: AGENT.OBJECTS.[maybePlant].Anlage...
+  if (parts.length < 3) return "Anlage";
+  if (parts[0] !== "AGENT" || parts[1] !== "OBJECTS") return "Anlage";
+
+  // Ohne Plant: AGENT.OBJECTS.Anlage....
+  if (parts[2] === "Anlage" || parts[2] === "System") {
+    return parts[2] === "System" ? "System" : "Anlage";
+  }
+
+  // Mit Plant: AGENT.OBJECTS.<Plant>.Anlage...
+  return parts[2];
+}
+
+function isTagesprogrammAddress(address) {
+  // mit oder ohne Plant-Segment
+  // AGENT.OBJECTS.System.Tagesprogramm....
+  // AGENT.OBJECTS.<PLANT>.System.Tagesprogramm....
+  return /^AGENT\.OBJECTS\.(?:[^.]+\.)?System\.Tagesprogramm\./i.test(address);
+}
+
+function makeAnlageRoot(plant) {
+  // plant === "Anlage" bedeutet "ohne Plant-Segment"
+  if (!plant || plant === "Anlage") return "AGENT.OBJECTS.Anlage";
+  return "AGENT.OBJECTS." + plant + ".Anlage";
+}
+
+function makeTagesprogrammRoot(plant) {
+  if (!plant || plant === "System") return "AGENT.OBJECTS.System.Tagesprogramm";
+  // mit Plant-Segment:
+  // AGENT.OBJECTS.<PLANT>.System.Tagesprogramm
+  return "AGENT.OBJECTS." + plant + ".System.Tagesprogramm";
+}
+
+// ============================================================
+// 3) BROWSE HELPERS + Multi-Plant Discovery
+// ============================================================
+function walkAny(nodeOrMap, out, predicate) {
+  if (!nodeOrMap) return;
+
+  if (
+    typeof nodeOrMap === "object" &&
+    (Object.prototype.hasOwnProperty.call(nodeOrMap, "name") ||
+      Object.prototype.hasOwnProperty.call(nodeOrMap, "childs"))
+  ) {
+    const name = nodeOrMap.name;
+    if (name && predicate(name)) out.push(name);
+
+    const kids = nodeOrMap.childs ? Object.values(nodeOrMap.childs) : null;
+    if (kids && kids.length) {
+      for (let i = 0; i < kids.length; i++) walkAny(kids[i], out, predicate);
+    }
+    return;
+  }
+
+  if (typeof nodeOrMap === "object") {
+    const values = Object.values(nodeOrMap);
+    for (let i = 0; i < values.length; i++) walkAny(values[i], out, predicate);
+  }
+}
+
+function collectPlantsFromAgentObjects(treeData) {
+  // Wir sammeln Plant-Namen aus Knoten:
+  // - AGENT.OBJECTS.<PLANT>.Anlage
+  // - AGENT.OBJECTS.<PLANT>.System
+  // (Je nach BrowseNodes-Struktur können auch Leaf-Namen kommen – wir filtern per Regex)
+  const out = [];
+  const rx = /^AGENT\.OBJECTS\.([^.]+)\.(Anlage|System)$/i;
+
+  function want(addr) {
+    if (typeof addr !== "string") return false;
+    const m = addr.match(rx);
+    if (!m) return false;
+    const plant = m[1];
+    // Standardknoten "System"/"Anlage" nicht als Plant zählen
+    if (!plant) return false;
+    if (plant.toLowerCase() === "system") return false;
+    if (plant.toLowerCase() === "anlage") return false;
+    out.push(plant);
+    return false;
+  }
+
+  walkAny(treeData, [], want);
+
+  // dedupe
+  const uniq = {};
+  for (let i = 0; i < out.length; i++) uniq[out[i]] = true;
+  return Object.keys(uniq);
+}
+
+function collectAnlageIOs(treeData) {
+  const out = [];
+  // ohne Plant: AGENT.OBJECTS.Anlage.<Group>.<Var>.IOs....
+  // mit Plant:  AGENT.OBJECTS.<PLANT>.Anlage.<Group>.<Var>.IOs....
+  const rx =
+    /^AGENT\.OBJECTS\.(?:[^.]+\.)?Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+
+  function want(addr) {
+    return typeof addr === "string" && rx.test(addr);
+  }
+  walkAny(treeData, out, want);
+  return out;
+}
+
+function collectTagesprogramm(treeData) {
+  const out = [];
+  // ohne Plant: AGENT.OBJECTS.System.Tagesprogramm.<A>.<B>.Automatischer_Eintrag.Heute.IW_Menge_Tag
+  // mit Plant:  AGENT.OBJECTS.<PLANT>.System.Tagesprogramm....
+  const rx =
+    /^AGENT\.OBJECTS\.(?:[^.]+\.)?System\.Tagesprogramm\.[^.]+\.[^.]+\.Automatischer_Eintrag\.Heute\.IW_Menge_Tag$/i;
+
+  function want(addr) {
+    return typeof addr === "string" && rx.test(addr);
+  }
+  walkAny(treeData, out, want);
+  return out;
+}
+
+// ============================================================
+// 4) SERIES DEFINITION (Multi-Plant + Sort/Legend-ready)
+// ============================================================
+function makeSeriesDefFromAddress(addr, groupOverride, visibleOverride) {
+  const parts = addr.split(".");
+
+  const plant = detectPlantFromAddress(addr);
+
+  // Standard: name = vorletzte/nahe IOs-Knoten
+  let name = parts[parts.length - 3] || addr;
+  let group = groupOverride || "Ungruppiert";
+  let yAxis = 0;
+  let step = false;
+  let tryDetectType = null;
+  let subgroup = null;
+
+  // Anlage:
+  // ohne Plant: AGENT.OBJECTS.Anlage.<Group>.<Var>.IOs.<...>
+  // mit Plant:  AGENT.OBJECTS.<PLANT>.Anlage.<Group>.<Var>.IOs.<...>
+  if (/^AGENT\.OBJECTS\.(?:[^.]+\.)?Anlage\./i.test(addr)) {
+    // Index-Shift: mit Plant ist <Group> bei parts[4], ohne Plant bei parts[3]
+    const hasPlant = (parts[2] !== "Anlage" && parts[2] !== "System");
+    const idxGroup = hasPlant ? 4 : 3;
+    const idxVar = hasPlant ? 5 : 4;
+
+    group = groupOverride || parts[idxGroup] || "Anlage";
+    name = parts[idxVar] || "?";
+
+    if (/\.Zustand$|\.Status$/i.test(addr)) {
+      yAxis = 1;
+      step = true;
+    } else if (/\.Aktiver_Istwert$/i.test(addr)) {
+      yAxis = 6;
+      step = true;
+    } else {
+      // ...Intern.Typ muss den richtigen Prefix treffen:
+      // ohne Plant: AGENT.OBJECTS.Anlage.<Group>.<Var>.Intern.Typ  => parts[0..4]
+      // mit Plant:  AGENT.OBJECTS.<PLANT>.Anlage.<Group>.<Var>.Intern.Typ => parts[0..5]
+      const baseCount = hasPlant ? 6 : 5;
+      tryDetectType = parts.slice(0, baseCount).join(".") + ".Intern.Typ";
+    }
+  }
+
+  // Tagesprogramm:
+  else if (isTagesprogrammAddress(addr)) {
+    group = groupOverride || "Tagesprogramm";
+    // Name ist bei deinem Pattern meist ein Segment weiter hinten, aber plant/no-plant verschiebt
+    // Wir nehmen ein robustes Segment in der Nähe:
+    // ...System.Tagesprogramm.<A>.<B>.Automatischer_Eintrag...
+    // A liegt:
+    // ohne Plant: parts[4]
+    // mit Plant:  parts[5]
+    let tpName = "";
+    if (parts.length >= 6) {
+      // Suche den Index von "Tagesprogramm"
+      let idxTP = -1;
+      for (let i = 0; i < parts.length; i++) {
+        if (String(parts[i]).toLowerCase() === "tagesprogramm") {
+          idxTP = i;
+          break;
+        }
+      }
+      if (idxTP !== -1 && parts[idxTP + 2]) tpName = parts[idxTP + 2];
+      else tpName = parts[5] || parts[4] || "";
+    }
+    name = String(tpName).replace(/_/g, " ").replace(/zu/g, "->");
+  }
+
+  const visible =
+    q.Variable && addr.indexOf(q.Variable) !== -1
+      ? true
+      : typeof visibleOverride === "boolean"
+      ? visibleOverride
+      : false;
+
+  return {
+    address: addr,
+    name: name,
+    group: group,
+    subgroup: subgroup,
+    yAxis: yAxis,
+    step: step,
+    visible: visible,
+    tryDetectType: tryDetectType,
+    plant: plant
+  };
+}
+
+function defsFromConfig(cfg) {
+  const defs = [];
+  if (!cfg || !Array.isArray(cfg.groups)) return defs;
+
+  cfg.groups.forEach(function (g) {
+    const gName = g && g.name ? String(g.name) : "Ungruppiert";
+    const vars = Array.isArray(g && g.variables) ? g.variables : [];
+    vars.forEach(function (v) {
+      if (!v || !v.address) return;
+      defs.push(makeSeriesDefFromAddress(v.address, gName, !!v.visible));
+    });
+  });
+
+  return defs;
+}
+
+function saveCurrentConfig() {
+  if (!chart) return;
+
+  const manualAddrSet = new Set(
+    manualDefinitions
+      .map(function (d) { return d && d.address; })
+      .filter(function (a) { return typeof a === "string"; })
+  );
+
+  const cfg = { reload: true, source: "config", groups: [] };
+  const grouped = {};
+
+  chart.series.forEach(function (s) {
+    const opts = s.options || {};
+    const addr = opts.address;
+    if (!addr) return;
+    if (manualAddrSet.has(addr)) return;
+
+    const g = opts.group || "Ungruppiert";
+    if (!grouped[g]) grouped[g] = [];
+    grouped[g].push({ address: addr, visible: s.visible });
+  });
+
+  Object.keys(grouped).forEach(function (groupName) {
+    cfg.groups.push({ name: groupName, variables: grouped[groupName] });
+  });
+
+  webMI.data.write(configAddr, JSON.stringify(cfg), function () {});
+}
+
+// ============================================================
+// 5) AGGREGATION (wie im anderen Code: RAW < 1 Woche, sonst 10m Average)
+//    - Tagesprogramm: RAW
+//    - Status/Zustand: RAW
+// ============================================================
+function getAggregationSimple(from, to, address) {
+  const diff = to - from;
+  const weekMs = 7 * 24 * 3600 * 1000;
+
+  if (isTagesprogrammAddress(address)) {
+    return { agg: null, int: null, unit: null, cat: "raw" };
+  }
+
+  if (diff < weekMs) {
+    return { agg: null, int: null, unit: null, cat: "raw" };
+  }
+
+  return { agg: "Average", int: "10", unit: "m", cat: "10m" };
+}
+
+// ============================================================
+// 6) FETCH DATA (NoData-Fallback + Randpunkte ±4 Wochen + Current Value)
+// ============================================================
+function fetchData(series, from, to) {
+  const address = series.options && series.options.address;
+  if (!address) return;
+
+  const manualType = series.options && series.options.dataType;
+  const isState = manualType === "status" || /\.Zustand$|\.Status$/i.test(address);
+
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
+
+  const weekMs = 7 * 24 * 3600 * 1000;
+  const lookMs = 4 * weekMs;
+  const bfFromMs = Math.max(0, fromMs - lookMs);
+  const ffToMs = toMs + lookMs;
+
+  function qf(filter, cb) {
+    webMI.data.queryFilter(filter, function (res) {
+      cb(res);
+    });
+  }
+
+  function buildMainFilter() {
+    const filter = {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + fromMs + "<=" + toMs]
+    };
+
+    if (!isState) {
+      const agg = getAggregationSimple(from, to, address);
+      if (agg && agg.agg) {
+        filter.aggregate = ["v:" + agg.agg];
+        filter.interval = ["v:" + agg.int];
+        filter.unit = ["v:" + agg.unit];
+      }
+    }
+
+    return filter;
+  }
+
+  function buildBackfillFilter() {
+    return {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + bfFromMs + "<=" + fromMs]
+    };
+  }
+
+  function buildForwardFilter() {
+    return {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + toMs + "<=" + ffToMs]
+    };
+  }
+
+  function applyData(pointsXY) {
+    series.setData(pointsXY, true);
+    series.options.loaded = true;
+    series.options.from = fromMs;
+    series.options.to = toMs;
+  }
+
+  function nowIsInsideRange() {
+    const now = Date.now();
+    return now >= fromMs && now <= toMs;
+  }
+
+  function tryDrawWithCurrentValueIfNeeded(doneIfNotPossible) {
+    if (!nowIsInsideRange()) {
+      doneIfNotPossible();
+      return;
+    }
+
+    webMI.data.read(address, function (e) {
+      const v = e && e.value != null ? e.value : null;
+      const cur = parseAnyNumber(v);
+      if (isNaN(cur)) {
+        doneIfNotPossible();
+        return;
+      }
+      applyData([[fromMs, cur], [toMs, cur]]);
+    });
+  }
+
+  qf(buildMainFilter(), function (mainRes) {
+    const mainData = normalizeResultToXY(mainRes);
+
+    // A) Daten im Fenster vorhanden -> Randpunkte ergänzen falls nötig
+    if (mainData.length > 0) {
+      const first = mainData[0];
+      const last = mainData[mainData.length - 1];
+
+      const needLeft = first[0] > fromMs;
+      const needRight = last[0] < toMs;
+
+      const points = mainData.slice();
+
+      function doLeft(done) {
+        if (!needLeft) { done(); return; }
+        qf(buildBackfillFilter(), function (bfRes) {
+          const bfData = normalizeResultToXY(bfRes);
+          if (bfData.length) points.unshift([fromMs, bfData[bfData.length - 1][1]]);
+          else points.unshift([fromMs, first[1]]);
+          done();
+        });
+      }
+
+      // Rechts: NICHT vordatieren -> bis to mit letztem Wert weiterziehen
+      function doRight(done) {
+        if (!needRight) { done(); return; }
+        qf(buildForwardFilter(), function () {
+          points.push([toMs, last[1]]);
+          done();
+        });
+      }
+
+      doLeft(function () {
+        doRight(function () {
+          points.sort(function (a, b) { return a[0] - b[0]; });
+          applyData(points);
+        });
+      });
+      return;
+    }
+
+    // B) Nichts im Fenster -> links/rechts suchen
+    qf(buildBackfillFilter(), function (bfRes) {
+      const bfData = normalizeResultToXY(bfRes);
+      const lastBefore = bfData.length ? bfData[bfData.length - 1] : null;
+
+      qf(buildForwardFilter(), function (ffRes) {
+        const ffData = normalizeResultToXY(ffRes);
+        const firstAfter = ffData.length ? ffData[0] : null;
+
+        if (lastBefore && firstAfter) {
+          applyData([[fromMs, lastBefore[1]], [toMs, firstAfter[1]]]);
+          return;
+        }
+        if (lastBefore) {
+          applyData([[fromMs, lastBefore[1]], [toMs, lastBefore[1]]]);
+          return;
+        }
+        if (firstAfter) {
+          applyData([[fromMs, firstAfter[1]], [toMs, firstAfter[1]]]);
+          return;
+        }
+
+        // C) Gar nichts gefunden -> wenn jetzt im Fenster: aktuelle Linie, sonst leer
+        tryDrawWithCurrentValueIfNeeded(function () {
+          applyData([]);
+        });
+      });
+    });
+  });
+}
+
+// ============================================================
+// 7) Y-ACHSE (FIX)
+// ============================================================
+function updateYAxisRangesAndRedraw() {
+  if (!chart) return;
+
+  const yUsed = new Set();
+  chart.series.forEach(function (s) {
+    if (s.visible) yUsed.add(s.options.yAxis);
+  });
+
+  const yAxisRanges = {
+    0: { min: 0, title: "T{Wert}" },
+    1: { min: 0, max: 60, title: "T{Zustand}" },
+    2: { min: 0, max: 1000, title: "T{Füllstand} m³" },
+    3: { min: 0, max: 500, title: "T{Druck} mBar" },
+    4: { min: 0, max: 500, title: "T{Durchfluss} m/h" },
+    5: { min: -100, max: 100, title: "T{Temperatur} °C" },
+    6: { min: 0, max: 100, title: "T{Aktiver Istwert} %" }
+  };
+
+  chart.yAxis.forEach(function (axis, idx) {
+    const use = yUsed.has(idx);
+    const cfg = use ? yAxisRanges[idx] : { min: null, max: null, title: "" };
+    axis.update({ min: cfg.min, max: cfg.max, title: { text: cfg.title } }, false);
+  });
+
+  chart.redraw();
+}
+
+// ============================================================
+// 8) RELOAD VISIBLE (Range aus Inputs)
+// ============================================================
+function reloadVisible() {
+  if (!chart) return;
+
+  const tr = getTimeRange();
+
+  suppressAfterSetExtremes = true;
+  chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+  suppressAfterSetExtremes = false;
+
+  chart.series.forEach(function (s) {
+    if (!s.visible) return;
+    fetchData(s, tr.from, tr.to);
+  });
+
+  updateYAxisRangesAndRedraw();
+}
+
+// ============================================================
+// 9) SERIEN AUFBAU + LEGENDE (MULTI-PLANT + Sort pro Plant)
+// ============================================================
+function addDiscoveredSeries(addressDefs, opts) {
+  const afterAddSave = opts && typeof opts.afterAddSave === "boolean" ? opts.afterAddSave : false;
+  let pendingTypeReads = 0;
+
+  while (chart.series.length) chart.series[0].remove(false);
+
+  // Manual defs
+  manualDefinitions.forEach(function (def) {
+    const isStatus = def.dataType === "status";
+    chart.addSeries(
+      {
+        name: def.name || def.group,
+        data: [],
+        address: def.address,
+        visible: !!def.visible,
+        type: "line",
+        yAxis: typeof def.yAxis === "number" ? def.yAxis : isStatus ? 1 : 0,
+        loaded: false,
+        group: def.group || "Allgemein",
+        subgroup: def.subgroup || null,
+        step: isStatus ? "left" : def.step ? "left" : undefined,
+        dataType: def.dataType || "value",
+        plant: def.plant || detectPlantFromAddress(def.address)
+      },
+      false
+    );
+  });
+
+  addressDefs.forEach(function (def) {
+    const isStateAddr = /\.Zustand$|\.Status$/i.test(def.address);
+
+    if (!isStateAddr && def.tryDetectType) {
+      pendingTypeReads++;
+      webMI.data.read(def.tryDetectType, function (e) {
+        const typ = e && e.value ? e.value.de : null;
+        let yIdx = def.yAxis != null ? def.yAxis : 0;
+
+        switch (typ) {
+          case "Auslastung": yIdx = 0; break;
+          case "Füllstandsmessung": yIdx = 2; break;
+          case "Druckmessung": yIdx = 3; break;
+          case "Durchflussmessung": yIdx = 4; break;
+          case "Temperaturmessung": yIdx = 5; break;
+          case "Gasleck- Sensor": yIdx = 0; break;
+        }
+
+        chart.addSeries(
+          {
+            name: def.name,
+            data: [],
+            address: def.address,
+            visible: !!def.visible,
+            type: "line",
+            yAxis: yIdx,
+            loaded: false,
+            group: def.group,
+            subgroup: def.subgroup || null,
+            step: def.step ? "left" : undefined,
+            plant: def.plant || detectPlantFromAddress(def.address)
+          },
+          false
+        );
+
+        pendingTypeReads--;
+        if (pendingTypeReads === 0) finalizeAdd();
+      });
+    } else {
+      chart.addSeries(
+        {
+          name: def.name,
+          data: [],
+          address: def.address,
+          visible: !!def.visible,
+          type: "line",
+          yAxis: def.yAxis != null ? def.yAxis : isStateAddr ? 1 : 0,
+          loaded: false,
+          group: def.group,
+          subgroup: def.subgroup || null,
+          step: def.step ? "left" : undefined,
+          plant: def.plant || detectPlantFromAddress(def.address)
+        },
+        false
+      );
+    }
+  });
+
+  if (pendingTypeReads === 0) finalizeAdd();
+
+  function finalizeAdd() {
+    chart.redraw();
+    buildLegend();
+
+    const tr = getTimeRange();
+    chart.series.forEach(function (s) {
+      if (s.visible && !s.options.loaded) fetchData(s, tr.from, tr.to);
+    });
+
+    suppressAfterSetExtremes = true;
+    chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+    suppressAfterSetExtremes = false;
+
+    updateYAxisRangesAndRedraw();
+
+    if (afterAddSave) saveCurrentConfig();
+  }
+}
+
+function buildLegend() {
+  const container = document.getElementById("html-tree");
+  if (!container || !chart) return;
+
+  container.innerHTML = "";
+
+  // plants[plant][group][sub] = series[]
+  const plants = {};
+  chart.series.forEach(function (s) {
+    const plant = (s.options && s.options.plant) ? s.options.plant : "Anlage";
+    const g = (s.options && s.options.group) ? s.options.group : "Ungruppiert";
+    const sub = (s.options && s.options.subgroup) ? s.options.subgroup : null;
+
+    if (!plants[plant]) plants[plant] = {};
+    if (!plants[plant][g]) plants[plant][g] = {};
+    if (!plants[plant][g][sub]) plants[plant][g][sub] = [];
+    plants[plant][g][sub].push(s);
+  });
+
+  const sortedPlants = Object.keys(plants).sort(function (a, b) {
+    return a.localeCompare(b);
+  });
+
+  sortedPlants.forEach(function (plant) {
+    const plantDiv = top.document.createElement("div");
+    plantDiv.style.fontWeight = "bold";
+    plantDiv.style.cursor = "pointer";
+    plantDiv.style.fontSize = "16px";
+    plantDiv.style.marginTop = "12px";
+    plantDiv.style.marginBottom = "4px";
+    plantDiv.style.color = "#222";
+
+    // Übersetzung optional (wenn vorhanden)
+    try {
+      webMI.data.call(
+        "Standard_elpo",
+        { Funktion: "Translate", Text: plant, Sprache: language },
+        function (resp) {
+          plantDiv.textContent = resp && resp.result ? resp.result : plant;
+        }
+      );
+    } catch (e) {
+      plantDiv.textContent = plant;
+    }
+
+    container.appendChild(plantDiv);
+
+    const plantBody = top.document.createElement("div");
+    plantBody.style.marginLeft = "8px";
+    plantBody.style.display = "block";
+    container.appendChild(plantBody);
+
+    plantDiv.addEventListener("click", function () {
+      plantBody.style.display = plantBody.style.display === "none" ? "block" : "none";
+    });
+
+    const groups = plants[plant];
+
+    // Sortliste pro Plant
+    const rawSort = parseMaybeJson(sortMap[plant]);
+    const sortList = Array.isArray(rawSort) ? rawSort : [];
+
+    function getSortIndex(name) {
+      if (!sortList.length) return -1;
+      for (let i = 0; i < sortList.length; i++) {
+        const item = sortList[i];
+        if (!item) continue;
+        if (item["1"] === name) return i;
+        if (item[1] === name) return i;
+        if (item.name === name) return i;
+        // fallback: erstes Value
+        const vals = Object.values(item);
+        if (vals && vals.length && vals[0] === name) return i;
+      }
+      return -1;
+    }
+
+    const allGroupNames = Object.keys(groups);
+    const hasAllgemein = allGroupNames.indexOf("Allgemein") !== -1;
+    const hasTagesprogramm = allGroupNames.indexOf("Tagesprogramm") !== -1;
+
+    const middle = allGroupNames.filter(function (g) {
+      if (g === "Allgemein") return false;
+      if (g === "Tagesprogramm") return false;
+      return true;
+    });
+
+    middle.sort(function (a, b) {
+      const ia = getSortIndex(a);
+      const ib = getSortIndex(b);
+
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b);
+    });
+
+    const groupNames = [];
+    if (hasAllgemein) groupNames.push("Allgemein");
+    groupNames.push.apply(groupNames, middle);
+    if (hasTagesprogramm) groupNames.push("Tagesprogramm");
+
+    groupNames.forEach(function (gName, idx) {
+      if (idx > 0) {
+        const hr = top.document.createElement("hr");
+        hr.style.border = "0";
+        hr.style.borderTop = "1px solid #444";
+        hr.style.margin = "10px 0";
+        plantBody.appendChild(hr);
+      }
+
+      const header = top.document.createElement("div");
+      header.style.fontWeight = "bold";
+      header.style.marginTop = "10px";
+      header.style.cursor = "pointer";
+      header.style.fontSize = "13px";
+
+      const displayName = String(gName).replace(/_/g, " ");
+
+      try {
+        webMI.data.call(
+          "Standard_elpo",
+          { Funktion: "Translate", Text: displayName, Sprache: language },
+          function (resp) {
+            header.textContent = resp && resp.result ? resp.result : displayName;
+          }
+        );
+      } catch (e) {
+        header.textContent = displayName;
+      }
+
+      plantBody.appendChild(header);
+
+      const body = top.document.createElement("div");
+      body.style.marginLeft = "8px";
+      body.style.display = "none";
+      plantBody.appendChild(body);
+
+      const hasVisible = Object.values(groups[gName]).some(function (arr) {
+        return arr.some(function (s) {
+          return s.visible;
+        });
+      });
+      if (hasVisible) body.style.display = "block";
+
+      header.addEventListener("click", function () {
+        body.style.display = body.style.display === "none" ? "block" : "none";
+      });
+
+      const subgroups = groups[gName];
+      const sortedSubs = Object.keys(subgroups).sort(function (a, b) {
+        if (a === "null") return -1;
+        if (b === "null") return 1;
+        return String(a).localeCompare(String(b));
+      });
+
+      sortedSubs.forEach(function (sub) {
+        let targetContainer = body;
+
+        if (sub && sub !== "null") {
+          const subHeader = top.document.createElement("div");
+          subHeader.style.fontStyle = "italic";
+          subHeader.style.marginLeft = "8px";
+          subHeader.style.cursor = "pointer";
+          subHeader.style.fontWeight = "bold";
+          subHeader.style.marginTop = "4px";
+          subHeader.style.fontSize = "12px";
+          subHeader.textContent = sub;
+
+          const subBody = top.document.createElement("div");
+          subBody.style.marginLeft = "8px";
+          subBody.style.display = "none";
+
+          subHeader.addEventListener("click", function (e) {
+            e.stopPropagation();
+            subBody.style.display = subBody.style.display === "none" ? "block" : "none";
+          });
+
+          body.appendChild(subHeader);
+          body.appendChild(subBody);
+          targetContainer = subBody;
+        }
+
+        const seriesList = subgroups[sub];
+        seriesList
+          .sort(function (a, b) {
+            return a.name.localeCompare(b.name);
+          })
+          .forEach(function (s) {
+            const row = top.document.createElement("div");
+            row.textContent = s.name;
+            row.style.cursor = "pointer";
+            row.style.padding = "2px 8px";
+            row.style.marginLeft = "8px";
+            row.style.color = s.visible ? s.color : "#666";
+            row.style.fontWeight = s.visible ? "bold" : "normal";
+
+            row.addEventListener("click", function (e) {
+              e.stopPropagation();
+
+              const show = !s.visible;
+              s.setVisible(show, false);
+
+              row.style.fontWeight = show ? "bold" : "normal";
+              row.style.color = show ? s.color : "#666";
+
+              const tr = getTimeRange();
+
+              if (show) {
+                fetchData(s, tr.from, tr.to);
+              }
+
+              suppressAfterSetExtremes = true;
+              chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+              suppressAfterSetExtremes = false;
+
+              updateYAxisRangesAndRedraw();
+            });
+
+            targetContainer.appendChild(row);
+          });
+      });
+    });
+  });
+}
+
+// ============================================================
+// 10) CONFIG/BROWSE LADEN (MULTI-PLANT)
+//     - Wenn Config ok -> daraus laden
+//     - Wenn leer/ungültig -> Multi-Plant BrowseNodes -> defs -> Config speichern
+// ============================================================
+function loadFromConfigOrBrowse() {
+  webMI.data.read(configAddr, function (ce) {
+    const cfgRaw = ce && ce.value ? ce.value : null;
+    const cfg = parseConfig(cfgRaw);
+
+    const cfgDefs = defsFromConfig(cfg);
+    const configIsEmpty = cfgDefs.length === 0;
+
+    if (!configIsEmpty) {
+      addDiscoveredSeries(cfgDefs, { afterAddSave: false });
+      return;
+    }
+
+    if (!browseAll) {
+      addDiscoveredSeries([], { afterAddSave: false });
+      return;
+    }
+
+    // 1) Wenn q.Plants vorhanden (CSV oder JSON Array), nutzen wir das.
+    //    Sonst: BrowseNodes("AGENT.OBJECTS") und Plants ableiten.
+    function parsePlantsFromQuery() {
+      if (!q.Plants) return null;
+
+      const v = parseMaybeJson(q.Plants);
+      if (Array.isArray(v)) {
+        return v.map(function (x) { return String(x).trim(); }).filter(Boolean);
+      }
+
+      if (typeof q.Plants === "string") {
+        return q.Plants
+          .split(",")
+          .map(function (s) { return s.trim(); })
+          .filter(Boolean);
+      }
+
+      return null;
+    }
+
+    function browseAllPlants(plants) {
+      // Wenn keine Plants gefunden: fallback auf "ohne Plant" (Anlage + System.Tagesprogramm)
+      if (!plants || !plants.length) plants = ["Anlage"];
+
+      const allAddrs = [];
+
+      function browsePlantAtIndex(i) {
+        if (i >= plants.length) {
+          const defs = allAddrs.map(function (addr) { return makeSeriesDefFromAddress(addr); });
+          addDiscoveredSeries(defs, { afterAddSave: true });
+          return;
+        }
+
+        const plant = plants[i];
+
+        const anlageRoot = makeAnlageRoot(plant);
+        const tpRoot = makeTagesprogrammRoot(plant);
+
+        webMI.data.call("BrowseNodes", { startAddress: anlageRoot }, function (treeAnlage) {
+          allAddrs.push.apply(allAddrs, collectAnlageIOs(treeAnlage));
+
+          webMI.data.call("BrowseNodes", { startAddress: tpRoot }, function (treeTP) {
+            allAddrs.push.apply(allAddrs, collectTagesprogramm(treeTP));
+            browsePlantAtIndex(i + 1);
+          });
+        });
+      }
+
+      browsePlantAtIndex(0);
+    }
+
+    const plantsFromQuery = parsePlantsFromQuery();
+    if (plantsFromQuery && plantsFromQuery.length) {
+      browseAllPlants(plantsFromQuery);
+      return;
+    }
+
+    // Auto-Plant discovery
+    webMI.data.call("BrowseNodes", { startAddress: "AGENT.OBJECTS" }, function (treeObjects) {
+      const plants = collectPlantsFromAgentObjects(treeObjects);
+
+      // Wenn nichts erkannt wird, trotzdem "ohne Plant" browsen
+      browseAllPlants(plants && plants.length ? plants : ["Anlage"]);
+    });
+  });
+}
+
+// ============================================================
+// 11) CHART (Zoom per Mausbereich + Reload Visible)
+// ============================================================
+function drawChart() {
+  chart = top.Highcharts.chart(document.getElementById("container"), {
+    chart: {
+      style: { fontSize: "11px" },
+
+      // ZOOM per Drag (Zeitbereich wählen)
+      zoomType: "x",
+
+      events: {
+        load: function () {
+          loadFromConfigOrBrowse();
+        }
+      }
+    },
+
+    title: { text: "T{Anlage}", useHTML: true },
+    time: { useUTC: false },
+    legend: { enabled: false },
+
+    xAxis: {
+      type: "datetime",
+      events: {
+        afterSetExtremes: function (e) {
+          if (suppressAfterSetExtremes) return;
+          if (!e || typeof e.min !== "number" || typeof e.max !== "number") return;
+
+          // Live-Modus: Zoom ignorieren
+          if (liveMode) return;
+
+          // Inputs übernehmen + sichtbare Serien neu laden (Aggregation RAW/10m via fetchData)
+          setTimeRangeInputs(e.min, e.max);
+
+          const from = new Date(e.min);
+          const to = new Date(e.max);
+
+          chart.series.forEach(function (s) {
+            if (!s.visible) return;
+            fetchData(s, from, to);
+          });
+
+          updateYAxisRangesAndRedraw();
+        }
+      }
+    },
+
+    yAxis: Array.from({ length: 7 }, function (_, i) {
+      return { title: { text: "" }, opposite: i === 1 };
+    }),
+
+    plotOptions: {
+      series: {
+        label: { enabled: true, connectorAllowed: false, style: { fontSize: "14px" } },
+        marker: { enabled: false }
+      }
+    },
+
+    tooltip: {
+      shared: true,
+      useHTML: true,
+      xDateFormat: "%d.%m.%Y %H:%M:%S",
+      pointFormat:
+        '<span style="color:{series.color}">●</span> <b>{series.name}</b>: {point.y:.2f}<br/>',
+      style: { fontSize: "14px" }
+    },
+
+    exporting: {
+      enabled: true,
+      chartOptions: { chart: { backgroundColor: "#ffffff" } },
+      showTable: false,
+      menuItemDefinitions: { viewData: null, viewFullscreen: null },
+      url: null,
+      fallbackToExportServer: false,
+      sourceWidth: 1700,
+      sourceHeight: 940
+    },
+
+    series: []
+  });
+
+  const tr = getTimeRange();
+  suppressAfterSetExtremes = true;
+  chart.xAxis[0].setExtremes(tr.from.getTime(), tr.to.getTime(), true, false, { trigger: "internal" });
+  suppressAfterSetExtremes = false;
+
+  updateYAxisRangesAndRedraw();
+}
+
+// ============================================================
+// 12) SORT LADEN (MULTI-PLANT kompatibel)
+//     Erwartung:
+//       - q.SortierVariable leer -> keine Sortierung
+//       - q.SortierVariable liefert:
+//           a) Array (wie bisher) -> wird für ALLE Plants verwendet
+//           b) Objekt { "<Plant>": [...], "<Plant2>": [...] } -> pro Plant
+// ============================================================
+function loadSortMapThenStart() {
+  function start() {
+    drawChart();
+    wireButtons();
+  }
+
+  if (!q.SortierVariable) {
+    // keine Sortierung
+    sortMap = {};
+    start();
+    return;
+  }
+
+  webMI.data.read(q.SortierVariable, function (e) {
+    const raw = e && e.value ? e.value : null;
+    const parsed = parseMaybeJson(raw);
+
+    // Objekt pro Plant
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      sortMap = parsed;
+      start();
+      return;
+    }
+
+    // Array -> für alle Plants verwenden (wir setzen später sortMap[plant] = array, falls plant nicht vorhanden)
+    if (Array.isArray(parsed)) {
+      sortMap = { "__default__": parsed };
+      start();
+      return;
+    }
+
+    // Fallback: nichts brauchbares
+    sortMap = {};
+    start();
+  });
+}
+
+// Wenn plant-spezifisch nicht existiert, fallback auf __default__
+function getSortForPlant(plant) {
+  if (sortMap && sortMap[plant]) return sortMap[plant];
+  if (sortMap && sortMap["__default__"]) return sortMap["__default__"];
+  return null;
+}
+
+// Patch: buildLegend nutzt sortMap[plant] direkt – hier mappen wir on-the-fly in buildLegend:
+(function patchSortMapAccess() {
+  const _parseMaybeJson = parseMaybeJson;
+  parseMaybeJson = function (v) {
+    // falls v "undefined", aber default vorhanden -> default liefern
+    if (v == null) return v;
+    return _parseMaybeJson(v);
+  };
+})();
+
+// ============================================================
+// 13) BUTTONS (Load + Live)
+// ============================================================
+function wireButtons() {
+  const loadBtn = document.getElementById("loadBtn");
+  if (loadBtn) loadBtn.addEventListener("click", reloadVisible);
+
+  const liveBtn = document.getElementById("liveBtn");
+  if (!liveBtn) return;
+
+  liveBtn.addEventListener("click", function () {
+    liveMode = !liveMode;
+
+    const fromEl = document.getElementById("startTime");
+    const toEl = document.getElementById("endTime");
+
+    if (fromEl) fromEl.readOnly = liveMode;
+    if (toEl) toEl.readOnly = liveMode;
+
+    liveBtn.textContent = liveMode ? "T{Live}" : "T{Historie}";
+
+    if (liveMode) {
+      if (liveTimer) clearInterval(liveTimer);
+
+      const tr = getTimeRange();
+      const diff = tr.to - tr.from;
+      if (!isNaN(diff) && diff > 30 * 1000) liveWindowMs = diff;
+      else liveWindowMs = 3600 * 1000;
+
+      const tick = function () {
+        const now2 = new Date();
+        const from2 = new Date(now2.getTime() - liveWindowMs);
+
+        if (fromEl) fromEl.value = toLocalDatetimeString(from2);
+        if (toEl) toEl.value = toLocalDatetimeString(now2);
+
+        reloadVisible();
+      };
+
+      tick();
+      liveTimer = setInterval(tick, 5000);
+    } else {
+      if (liveTimer) clearInterval(liveTimer);
+      liveTimer = null;
+    }
+  });
+}
+
+// ============================================================
+// 14) START
+// ============================================================
+webMI.libraryLoader.load(
+  [
+    "highcharts/highcharts.js",
+    "highcharts/modules/exporting.js",
+    "highcharts/modules/export-data.js",
+    "highcharts/modules/offline-exporting.js",
+    "highcharts/modules/series-label.js",
+    "highcharts/modules/datagrouping.js",
+    "highcharts/themes/grid-light.js"
+  ],
+  [],
+  function () {
+    webMI.addOnload(function () {
+      language = top.language;
+
+      const now = new Date();
+      const past = new Date(now.getTime() - (parseInt(q.Zeitbereich) || 24 * 3600 * 1000));
+
+      const startEl = document.getElementById("startTime");
+      const endEl = document.getElementById("endTime");
+      if (startEl) startEl.value = toLocalDatetimeString(past);
+      if (endEl) endEl.value = toLocalDatetimeString(now);
+
+      // Sort zuerst laden, dann drawChart()
+      loadSortMapThenStart();
+    });
+  }
+);
