@@ -1,38 +1,4 @@
-<?xml version='1.0' encoding='UTF-8'?>
-<svg height="940" version="1.2" width="1660" xmlns="http://www.w3.org/2000/svg" xmlns:atv="http://webmi.atvise.com/2007/svgext" xmlns:xlink="http://www.w3.org/1999/xlink">
- <defs/>
- <metadata>
-  <atv:parameter behavior="optional" defaultvalue="AGENT.DISPLAYS.MAIN.Anlage.SortOrder" desc="Funktioniert mit der Display Sort Variable aus dem Nodebrowser" name="SortierVariable" substitute="" valuetype="address"/>
-  <atv:parameter behavior="mandatory" defaultvalue="86400000" desc="Standardzeitbereich in ms" name="Zeitbereich" valuetype="number"/>
-  <atv:parameter behavior="optional" name="Variable" valuetype="address"/>
-  <atv:gridconfig enabled="false" gridstyle="lines" height="20" width="20"/>
-  <atv:snapconfig enabled="false" height="10" width="10"/>
- </metadata>
- <foreignObject height="940px" id="id_0" width="1660px" x="0" y="0">
-  <div style="width:100%; height:100%; display:flex; font-family:Segoe UI, Arial, sans-serif; box-sizing:border-box;" xmlns="http://www.w3.org/1999/xhtml">
-   <!-- LINKS: Controls + Chart -->
-   <div style="flex:1; display:flex; flex-direction:column; padding:10px; box-sizing:border-box; min-height:0;">
-    <div style="display:flex; gap:10px; margin-bottom:10px; align-items:flex-end; background:#f4f4f4; padding:10px; border-radius:8px; box-shadow:0 0 4px rgba(0,0,0,0.1);">
-     <div style="display:flex; flex-direction:column;">
-      <label style="font-size:12px; margin-bottom:2px;">T{Von}:</label>
-      <input id="startTime" max="2199-12-31T23:59" min="2000-01-01T00:00" oninput="this.setCustomValidity(''); if(this.validity.rangeOverflow || this.validity.rangeUnderflow){this.setCustomValidity('Datum muss zwischen 2000 und 2099 liegen.');}" style="padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px; min-width:140px;" type="datetime-local"/>
-     </div>
-     <div style="display:flex; flex-direction:column;">
-      <label style="font-size:12px; margin-bottom:2px;">T{Bis}:</label>
-      <input id="endTime" max="2199-12-31T23:59" min="2025-01-01T00:00" oninput="this.setCustomValidity(''); if(this.validity.rangeOverflow || this.validity.rangeUnderflow){this.setCustomValidity('Datum muss zwischen 2000 und 2099 liegen.');}" style="padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px; min-width:140px;" type="datetime-local"/>
-     </div>
-     <button id="shiftLeftBtn" style="padding:8px 10px; border:none; background:#555; color:white; border-radius:4px; cursor:pointer; font-size:14px;" title="T{Zurück}">⟵</button>
-     <button id="shiftRightBtn" style="padding:8px 10px; border:none; background:#555; color:white; border-radius:4px; cursor:pointer; font-size:14px;" title="T{Vor}">⟶</button>
-     <button id="loadBtn" style="padding:8px 10px; border:none; background:#276ef1; color:white; border-radius:4px; cursor:pointer; font-size:14px;">↻ T{Laden}</button>
-     <button id="liveBtn" style="padding:8px 10px; border:none; background:#777; color:white; border-radius:4px; cursor:pointer; font-size:14px;">T{Historie}</button>
-    </div>
-    <div id="container" style="flex:1; min-height:0; width:100%; overflow:hidden; border-radius:8px;"/>
-   </div>
-   <!-- RECHTS: Tree Legend -->
-   <div id="html-tree" style="width:260px; padding:10px; overflow:auto; font-size:13px; box-sizing:border-box; border-left:1px solid #ddd;"/>
-  </div>
- </foreignObject>
- <script atv:desc="" atv:name="" type="text/ecmascript"><![CDATA[// ============================================================
+// ============================================================
 // 20260130 - 2  Multi-Plant Highcharts (Tree-Legende, Live + Shift, OHNE Pad-Serien)
 // READY TO PASTE
 //
@@ -55,288 +21,8 @@
 // 0) MANUAL DEFINITIONS (bleiben immer, werden NICHT in Config gespeichert)
 // ============================================================
 
-const manualDefinitions = [
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "T{BHKW}",
-    address:
-      "AGENT.OBJECTS.Biometano.Anlage.Fackel_BHKW_Upgrading.Schnittstelle_BHKW.Leistung_BHKW_zu_BGA",
-    name: "T{Leistung BHKW}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "T{Biogas}",
-    address:
-      "AGENT.OBJECTS.Biometano.Anlage.Fackel_BHKW_Upgrading.Parameter.Steuerung_Fackel.Gesamt_Fuellstand",
-    name: "T{Gesamt Gasfüllstand}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Spannung_L1_L2",
-    name: "T{Spannung L1-L2}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Spannung_L2_L3",
-    name: "T{Spannung L2-L3}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Spannung_L3_L1",
-    name: "T{Spannung L3-L1}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Strom_L1",
-    name: "T{Strom L1}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Strom_L2",
-    name: "T{Strom L2}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Strom_L3",
-    name: "T{Strom L3}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR1",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR1.Gesamtwirkleistung",
-    name: "T{Gesamtwirkleistung}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
+// sind in einem externen script gespeichert
 
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Spannung_L1_L2",
-    name: "T{Spannung L1-L2}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Spannung_L2_L3",
-    name: "T{Spannung L2-L3}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Spannung_L3_L1",
-    name: "T{Spannung L3-L1}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Strom_L1",
-    name: "T{Strom L1}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Strom_L2",
-    name: "T{Strom L2}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Strom_L3",
-    name: "T{Strom L3}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "CR2",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.CR2.Gesamtwirkleistung",
-    name: "T{Gesamtwirkleistung}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Spannung_L1_L2",
-    name: "T{Spannung L1-L2}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Spannung_L2_L3",
-    name: "T{Spannung L2-L3}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Spannung_L3_L1",
-    name: "T{Spannung L3-L1}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Strom_L1",
-    name: "T{Strom L1}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Strom_L2",
-    name: "T{Strom L2}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Strom_L3",
-    name: "T{Strom L3}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-  {
-    plant: "Biometano",
-    group: "Allgemein",
-    subgroup: "HV",
-    address: "AGENT.OBJECTS.Biometano.System.Energie.HV.Gesamtwirkleistung",
-    name: "T{Gesamtwirkleistung}",
-    yAxis: 0,
-    step: false,
-    visible: false,
-    dataType: "value",
-    Archiv: "Archiv",
-  },
-];
 
 
 // ============================================================
@@ -365,18 +51,27 @@ let suppressAfterSetExtremes = false;
 
 
 // ============================================================
-// 0c) MULTI / SINGLE MODE
+// 0c) MULTI / SINGLE / LEGACY MODE  (PATCH: Plant leer => Legacy)
 // ============================================================
 
 const queryParams = webMI.query;
 
 const plantParamRaw = (typeof queryParams.Plant === "string") ? queryParams.Plant.trim() : "";
-const isMultiPlantMode = (!plantParamRaw || plantParamRaw.toUpperCase() === "ALL");
+
+// NEU:
+// - MultiPlant NUR wenn Plant="ALL"
+// - Plant leer => Legacy (kein Header wie Single)
+const isMultiPlantMode = (plantParamRaw.toUpperCase() === "ALL");
+
+// SinglePlant nur wenn explizit ein Plant gesetzt ist (und nicht ALL)
+const singlePlantName = (!isMultiPlantMode && plantParamRaw) ? plantParamRaw : "";
+
+// Legacy wenn weder Multi noch Single
+const isLegacyMode = (!isMultiPlantMode && !singlePlantName);
 
 const defaultPlantNames = ["Biometano", "Belagreen", "BBO"];
-const singlePlantName = isMultiPlantMode ? "" : plantParamRaw;
 
-// Config-Adresse (Multi: global | Single (neues Schema): pro Plant | Legacy: global)
+// Config-Adresse (Multi: global | Single: pro Plant | Legacy: global)
 const configAddress = isMultiPlantMode
   ? "AGENT.OBJECTS.System.Diagramm.Konfiguriert"
   : (singlePlantName
@@ -384,19 +79,18 @@ const configAddress = isMultiPlantMode
       : "AGENT.OBJECTS.System.Diagramm.Konfiguriert"
     );
 
-// SortOrder pro Plant
+// SortOrder pro Plant (Multi)
 const sortOrderAddressMulti = {
   Biometano: "AGENT.DISPLAYS.MAIN.Biometano.Anlage.SortOrder",
   Belagreen: "AGENT.DISPLAYS.MAIN.Belagreen.Anlage.SortOrder",
   BBO: "AGENT.DISPLAYS.MAIN.BBO.Anlage.SortOrder"
 };
 
-// Single (neues Schema) Standard-SortOrder
+// Single SortOrder
 const sortOrderAddressSingleDefault = singlePlantName
   ? ("AGENT.DISPLAYS.MAIN." + singlePlantName + ".Anlage.SortOrder")
   : "";
 
-// Wenn q.SortierVariable gesetzt ist, hat das Vorrang (Single-Fall)
 const sortOrderAddressSingle = queryParams.SortierVariable ? queryParams.SortierVariable : sortOrderAddressSingleDefault;
 
 
@@ -538,6 +232,46 @@ function isTagesprogrammAddress(address) {
   return /^AGENT\.OBJECTS\.System\.Tagesprogramm\./i.test(address);
 }
 
+function mergePointsPreferSecond(basePoints, preferPoints) {
+  // basePoints = sampled, preferPoints = raw
+  // Ergebnis: sampled + raw (raw überschreibt bei gleichem Timestamp)
+  const map = new Map();
+
+  for (let i = 0; i < basePoints.length; i++) {
+    map.set(basePoints[i][0], basePoints[i][1]);
+  }
+  for (let j = 0; j < preferPoints.length; j++) {
+    map.set(preferPoints[j][0], preferPoints[j][1]); // raw wins
+  }
+
+  const out = [];
+  map.forEach(function (v, k) { out.push([k, v]); });
+  out.sort(function (a, b) { return a[0] - b[0]; });
+  return out;
+}
+
+function buildQueryFilter(address, fromMs, toMs, agg, archiveName) {
+  const filter = {
+    type: ["v:1"],
+    address: ["v:" + address],
+    timestamp: ["n:>=" + fromMs + "<=" + toMs]
+  };
+
+  // optional: Archiv wählen (nur wenn gesetzt)
+  if (archiveName) {
+    filter.archive = ["v:" + archiveName];
+  }
+
+  // optional: Aggregation
+  if (agg && agg.aggregate) {
+    filter.aggregate = ["v:" + agg.aggregate];
+    filter.interval = ["v:" + agg.interval];
+    filter.unit = ["v:" + agg.unit];
+  }
+
+  return filter;
+}
+
 
 // ============================================================
 // 2) SERIES ID (stabil, gut lesbar)
@@ -584,34 +318,59 @@ function walkTreeCollect(nodeOrMap, outputArray, predicate) {
 }
 
 function getRegexForAnlageIOs() {
+  // Optionaler Base-Filter über q.Variable (funktioniert in Legacy + Single + Multi)
+  var base = (typeof queryParams.Variable === "string") ? normalizeAddress(queryParams.Variable) : "";
+  base = base ? escapeRegExp(base.replace(/\.*$/, "")) : ""; // ohne trailing dots
+
+  // Helper: baut optional "unterhalb base" ein
+  function withBase(rxBody) {
+    if (!base) return new RegExp(rxBody, "i");
+    // base muss am Anfang stehen, danach beliebige Unterpfade
+    return new RegExp("^" + base + "\\.(.+\\.)?"+ rxBody.replace(/^\^/, "").replace(/\$$/, "") + "$", "i");
+  }
+
+  // ---- MULTI ----
   if (isMultiPlantMode) {
-    return /^AGENT\.OBJECTS\.(Biometano|Belagreen|BBO)\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+    // Legacy: AGENT.OBJECTS.Anlage.<Group>.<Name>.IOs.<Signal>
+    var rx =
+      "^AGENT\\.OBJECTS\\.(?:(Biometano|Belagreen|BBO)\\.)?Anlage\\.[^.]+\\.[^.]+\\.IOs\\.(Istwert|Position_Istwert|Status|Zustand)$";
+    return withBase(rx);
   }
 
+  // ---- SINGLE----
   if (singlePlantName) {
-    return new RegExp(
-      "^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlantName) + "\\.Anlage\\.[^.]+\\.[^.]+\\.IOs\\.(Istwert|Position_Istwert|Status|Zustand)$",
-      "i"
-    );
+    var rxSingle =
+      "^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlantName) + "\\.Anlage\\.[^.]+\\.[^.]+\\.IOs\\.(Istwert|Position_Istwert|Status|Zustand)$";
+    return withBase(rxSingle);
   }
 
-  return /^AGENT\.OBJECTS\.Anlage\.[^.]+\.[^.]+\.IOs\.(Istwert|Position_Istwert|Status|Zustand)$/i;
+  // ---- LEGACY ----
+  var rxLegacy =
+    "^AGENT\\.OBJECTS\\.Anlage\\.[^.]+\\.[^.]+\\.IOs\\.(Istwert|Position_Istwert|Status|Zustand)$";
+  return withBase(rxLegacy);
 }
+
 
 function getRegexForTagesprogramm() {
-  if (isMultiPlantMode) {
-    return /^AGENT\.OBJECTS\.(Biometano|Belagreen|BBO)\.System\.Tagesprogramm\.[^.]+\.[^.]+(\.Automatischer_Eintrag)?\.Heute\.IW_Menge_Tag$/i;
+
+  var base = (typeof queryParams.Variable === "string") ? normalizeAddress(queryParams.Variable) : "";
+  var useBase = base && base.indexOf(".System.Tagesprogramm.") !== -1;
+  base = useBase ? escapeRegExp(base.replace(/\.*$/, "")) : "";
+
+  function withBase(rxBody) {
+    if (!base) return new RegExp(rxBody, "i");
+    return new RegExp("^" + base + "\\.(.+\\.)?" + rxBody.replace(/^\^/, "").replace(/\$$/, "") + "$", "i");
   }
 
-  if (singlePlantName) {
-    return new RegExp(
-      "^AGENT\\.OBJECTS\\." + escapeRegExp(singlePlantName) + "\\.System\\.Tagesprogramm\\.[^.]+\\.[^.]+(\\.Automatischer_Eintrag)?\\.Heute\\.IW_Menge_Tag$",
-      "i"
-    );
-  }
+  // Multi + Legacy in einem Regex:
+  // - Multi:   AGENT.OBJECTS.<Plant>.System.Tagesprogramm....
+  // - Legacy:  AGENT.OBJECTS.System.Tagesprogramm....
+  var rx =
+    "^AGENT\\.OBJECTS\\.(?:(Biometano|Belagreen|BBO)\\.)?System\\.Tagesprogramm\\.[^.]+\\.[^.]+(\\.Automatischer_Eintrag)?\\.Heute\\.IW_Menge_Tag$";
 
-  return /^AGENT\.OBJECTS\.System\.Tagesprogramm\.[^.]+(\.Automatischer_Eintrag)?\.Heute\.IW_Menge_Tag$/i;
+  return withBase(rx);
 }
+
 
 function collectAnlageAddresses(treeData) {
   const out = [];
@@ -701,7 +460,7 @@ function makeSeriesDefinitionFromAddress(address, groupOverride, visibleOverride
   // Sichtbarkeit: q.Variable hat Priorität
   const visibleByQuery =
     (queryParams.Variable && addr.indexOf(normalizeAddress(queryParams.Variable)) !== -1);
-
+	console.log(visibleByQuery)
   const initialVisible =
     visibleByQuery ? true :
     (typeof visibleOverride === "boolean") ? visibleOverride :
@@ -758,7 +517,6 @@ function decideAggregation(fromDate, toDate, address) {
 // ============================================================
 // 6) FETCH DATA (nur echte Archivpunkte, Token-Schutz)
 // ============================================================
-
 function fetchSeriesData(series, fromDate, toDate, options) {
   if (!series) return;
 
@@ -768,40 +526,249 @@ function fetchSeriesData(series, fromDate, toDate, options) {
   const token = (typeof options.token === "number") ? options.token : 0;
 
   const address = normalizeAddress(series.options && series.options.address);
-  if (!address) { if (onDone) onDone(); return; }
-
-  const fromMs = fromDate.getTime();
-  const toMs = toDate.getTime();
-
-  function isStale() {
-    return (token && token !== currentReloadToken);
+  if (!address) {
+    console.warn("[FETCH] Kein Address in Serie", series);
+    if (onDone) onDone();
+    return;
   }
 
-  const filter = {
-    type: ["v:1"],
-    address: ["v:" + address],
-    timestamp: ["n:>=" + fromMs + "<=" + toMs]
-  };
+  function isStale() { return (token && token !== currentReloadToken); }
 
-  // Aggregation (außer Status/TP -> decideAggregation liefert nulls)
-  const agg = decideAggregation(fromDate, toDate, address);
-  if (agg && agg.aggregate) {
-    filter.aggregate = ["v:" + agg.aggregate];
-    filter.interval = ["v:" + agg.interval];
-    filter.unit = ["v:" + agg.unit];
+  const isState = /\.Zustand$|\.Status$/i.test(address);
+  const isTP = isTagesprogrammAddress(address);
+
+  const rawArchiveName = queryParams.RawArchiv ? String(queryParams.RawArchiv) : "RAW";
+  const sampledArchiveName = queryParams.SampledArchiv ? String(queryParams.SampledArchiv) : "SAMPLED_5MIN";
+
+  // Zeitraum aktuell
+  let fromMsCurrent = fromDate.getTime();
+  let toMsCurrent = toDate.getTime();
+
+  // > 2 Wochen => analog nur noch Average 10m (kein Sampled)
+  const diffMs = toMsCurrent - fromMsCurrent;
+  const twoWeeksMs = 14 * 24 * 3600 * 1000;
+  const analogUseOnlyAvg10m = (!isState && !isTP && diffMs >= twoWeeksMs);
+
+  function logHeader(fromMs, toMs) {
+    console.log("--------------------------------------------------");
+    console.log("[FETCH] Serie:", series.name);
+    console.log("[FETCH] Address:", address);
+    console.log("[FETCH] Zeitraum:", new Date(fromMs).toISOString(), "→", new Date(toMs).toISOString());
+    console.log("[FETCH] Archive RAW:", rawArchiveName, "| SAMPLED:", sampledArchiveName);
+    console.log("[FETCH] Status:", isState, "| Tagesprogramm:", isTP);
+    console.log("[FETCH] AnalogOnlyAvg10m:", analogUseOnlyAvg10m);
   }
 
-  webMI.data.queryFilter(filter, function (res) {
-    if (isStale()) { if (onDone) onDone(); return; }
+  logHeader(fromMsCurrent, toMsCurrent);
 
-    const points = normalizeQueryResultToPoints(res);
+  function normalizeRes(res) {
+    return normalizeQueryResultToPoints(res);
+  }
 
+  function queryOnce(filter, tag, cb) {
+    console.log(tag + " Filter:", JSON.stringify(filter));
+    webMI.data.queryFilter(filter, function (res) {
+      if (isStale()) {
+        console.warn(tag + " STALE → verworfen");
+        cb(null, []);
+        return;
+      }
+      console.log(tag + " Result:", res);
+      const pts = normalizeRes(res);
+      console.log(tag + " Punkte:", pts.length);
+      cb(res, pts);
+    });
+  }
+
+  function setSeries(points, reasonTag) {
+    if (!points) points = [];
+    if (points.length === 0) console.warn(reasonTag + " ⚠️ KEINE DATEN!");
     series.setData(points, redraw);
     series.options.loaded = true;
-    series.options.from = fromMs;
-    series.options.to = toMs;
-
+    series.options.from = fromMsCurrent;
+    series.options.to = toMsCurrent;
     if (onDone) onDone();
+  }
+
+  function makeBaseFilter(fromMs, toMs) {
+    return {
+      type: ["v:1"],
+      address: ["v:" + address],
+      timestamp: ["n:>=" + fromMs + "<=" + toMs]
+    };
+  }
+
+  // =====================================================
+  // A) Status/Zustand & Tagesprogramm: immer RAW (Archiv -> Fallback ohne Archiv)
+  // =====================================================
+  if (isState || isTP) {
+    console.log("[FETCH] → Status/TP (immer RAW, fallback ohne archive)");
+
+    const fA = makeBaseFilter(fromMsCurrent, toMsCurrent);
+    fA.archive = ["v:" + rawArchiveName];
+
+    queryOnce(fA, "[FETCH][A:RAW+ARCHIVE]", function (_resA, ptsA) {
+      if (ptsA && ptsA.length > 0) {
+        setSeries(ptsA, "[FETCH][A:RAW+ARCHIVE]");
+        return;
+      }
+
+      const fB = makeBaseFilter(fromMsCurrent, toMsCurrent); // OHNE archive
+      queryOnce(fB, "[FETCH][B:RAW-NOARCHIVE]", function (_resB, ptsB) {
+        setSeries(ptsB, "[FETCH][B:RAW-NOARCHIVE]");
+      });
+    });
+
+    return;
+  }
+
+  // =====================================================
+  // B0) Analog >= 2 Wochen: NUR Average 10m (kein Sampled, kein Merge)
+  //     Archiv -> Fallback ohne Archiv -> Fallback RAW ohne alles
+  // =====================================================
+  if (analogUseOnlyAvg10m) {
+    console.log("[FETCH] → Analog >=2 Wochen: NUR Average 10m");
+
+    function avg10WithArchive(cb) {
+      const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+      f.archive = ["v:" + rawArchiveName];           // <<< WICHTIG: ARCHIVE setzen
+      f.aggregate = ["v:Average"];                   // <<< WICHTIG: Average (nicht avg)
+      f.interval = ["v:10"];
+      f.unit = ["v:m"];
+      queryOnce(f, "[FETCH][AVG1:AVG10+ARCHIVE]", function (_res, pts) { cb(pts); });
+    }
+
+    function avg10NoArchive(cb) {
+      const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+      f.aggregate = ["v:Average"];                   // <<< WICHTIG: Average (nicht avg)
+      f.interval = ["v:10"];
+      f.unit = ["v:m"];
+      queryOnce(f, "[FETCH][AVG2:AVG10-NOARCHIVE]", function (_res, pts) { cb(pts); });
+    }
+
+    function rawNoArchiveNoAgg(cb) {
+      const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+      delete f.aggregate; delete f.interval; delete f.unit; delete f.archive;
+      queryOnce(f, "[FETCH][AVG3:RAW-NOARCHIVE-NOAGG]", function (_res, pts) { cb(pts); });
+    }
+
+    avg10WithArchive(function (pts1) {
+      if (pts1.length > 0) { setSeries(pts1, "[FETCH][AVG1]"); return; }
+
+      avg10NoArchive(function (pts2) {
+        if (pts2.length > 0) { setSeries(pts2, "[FETCH][AVG2]"); return; }
+
+        rawNoArchiveNoAgg(function (pts3) {
+          setSeries(pts3, "[FETCH][AVG3]");
+        });
+      });
+    });
+
+    return;
+  }
+
+  // =====================================================
+  // B1) Analog < 2 Wochen: Sampled 5m + RAW Merge (RAW gewinnt)
+  // =====================================================
+  console.log("[FETCH] → Analog <2 Wochen: SAMPLED 5m + RAW (mit Fallbacks)");
+
+  function sampledWithArchive(cb) {
+    const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+    f.archive = ["v:" + sampledArchiveName];
+    f.aggregate = ["v:Sampled"];
+    f.interval = ["v:5"];
+    f.unit = ["v:m"];
+    queryOnce(f, "[FETCH][S1:SAMPLED+ARCHIVE]", function (_res, pts) { cb(pts); });
+  }
+
+  function sampledNoArchive(cb) {
+    const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+    f.aggregate = ["v:Sampled"];
+    f.interval = ["v:5"];
+    f.unit = ["v:m"];
+    queryOnce(f, "[FETCH][S2:SAMPLED-NOARCHIVE]", function (_res, pts) { cb(pts); });
+  }
+
+  function rawWithArchive(cb) {
+    const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+    f.archive = ["v:" + rawArchiveName];
+    queryOnce(f, "[FETCH][R1:RAW+ARCHIVE]", function (_res, pts) { cb(pts); });
+  }
+
+  function rawNoArchive(cb) {
+    const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+    queryOnce(f, "[FETCH][R2:RAW-NOARCHIVE]", function (_res, pts) { cb(pts); });
+  }
+
+  function rawNoArchiveNoAgg(cb) {
+    const f = makeBaseFilter(fromMsCurrent, toMsCurrent);
+    delete f.aggregate; delete f.interval; delete f.unit; delete f.archive;
+    queryOnce(f, "[FETCH][R3:RAW-NOARCHIVE-NOAGG]", function (_res, pts) { cb(pts); });
+  }
+
+  function widenRange7Days() {
+    const now = new Date();
+    toMsCurrent = now.getTime();
+    fromMsCurrent = now.getTime() - (7 * 24 * 3600 * 1000);
+    console.warn("[FETCH][D] DEBUG: Zeitraum auf 7 Tage erweitert:",
+      new Date(fromMsCurrent).toISOString(), "→", new Date(toMsCurrent).toISOString()
+    );
+  }
+
+  sampledWithArchive(function (ptsS1) {
+    if (ptsS1.length > 0) {
+      rawWithArchive(function (ptsR1) {
+        if (ptsR1.length === 0) {
+          rawNoArchive(function (ptsR2) {
+            const merged = mergePointsPreferSecond(ptsS1, ptsR2);
+            console.log("[FETCH][MERGE] Final Punkte:", merged.length);
+            setSeries(merged, "[FETCH][MERGE]");
+          });
+          return;
+        }
+        const merged = mergePointsPreferSecond(ptsS1, ptsR1);
+        console.log("[FETCH][MERGE] Final Punkte:", merged.length);
+        setSeries(merged, "[FETCH][MERGE]");
+      });
+      return;
+    }
+
+    sampledNoArchive(function (ptsS2) {
+      rawWithArchive(function (ptsR1) {
+        if (ptsR1.length === 0) {
+          rawNoArchive(function (ptsR2) {
+            const merged = mergePointsPreferSecond(ptsS2, ptsR2);
+            console.log("[FETCH][MERGE] Final Punkte:", merged.length);
+
+            if (merged.length > 0) { setSeries(merged, "[FETCH][MERGE]"); return; }
+
+            rawNoArchiveNoAgg(function (ptsC) {
+              if (ptsC.length > 0) { setSeries(ptsC, "[FETCH][R3]"); return; }
+
+              widenRange7Days();
+              rawNoArchive(function (ptsD) {
+                setSeries(ptsD, "[FETCH][D]");
+              });
+            });
+          });
+          return;
+        }
+
+        const merged = mergePointsPreferSecond(ptsS2, ptsR1);
+        console.log("[FETCH][MERGE] Final Punkte:", merged.length);
+
+        if (merged.length > 0) { setSeries(merged, "[FETCH][MERGE]"); return; }
+
+        rawNoArchiveNoAgg(function (ptsC) {
+          if (ptsC.length > 0) { setSeries(ptsC, "[FETCH][R3]"); return; }
+
+          widenRange7Days();
+          rawNoArchive(function (ptsD) {
+            setSeries(ptsD, "[FETCH][D]");
+          });
+        });
+      });
+    });
   });
 }
 
@@ -813,33 +780,84 @@ function fetchSeriesData(series, fromDate, toDate, options) {
 function updateYAxisRangesAndRedraw() {
   if (!chartInstance) return;
 
+  // Default/Startbereiche (nur solange Daten nicht out-of-range sind)
+  const defaultRanges = {
+    0: { min: 0, title: "T{Wert}" },
+    1: { min: 0, max: 60, title: "T{Zustand}" },
+    2: { min: 0, max: 500, title: "T{Füllstand} m³" },
+    3: { min: -10, max: 10, title: "T{Druck}" },
+    4: { min: 0, max: 100, title: "T{Durchfluss} m/h" },
+    5: { min: -50, max: 50, title: "T{Temperatur} °C" },
+    6: { min: 0, max: 100, title: "T{Aktiver Istwert} %" },
+    7: { min: -100, max: 100, title: "T{Auslastung}"}
+  };
+
+  // Welche Achsen werden überhaupt benutzt?
   const usedAxisIndexes = new Set();
   chartInstance.series.forEach(function (s) {
     if (s.visible) usedAxisIndexes.add(s.options.yAxis);
   });
 
-  const yAxisRanges = {
-    0: { min: 0, title: "T{Wert}" },
-    1: { min: 0, max: 60, title: "T{Zustand}" },
-    2: { min: 0, max: 1000, title: "T{Füllstand} m³" },
-    3: { min: 0, max: 500, title: "T{Druck} mBar" },
-    4: { min: 0, max: 500, title: "T{Durchfluss} m/h" },
-    5: { min: -100, max: 100, title: "T{Temperatur} °C" },
-    6: { min: 0, max: 100, title: "T{Aktiver Istwert} %" }
-  };
+  // Min/Max aus den sichtbaren Serien pro Achse ermitteln
+  const dataMinMaxByAxis = {}; // { idx: { min, max, hasData } }
 
+  chartInstance.series.forEach(function (s) {
+    if (!s.visible) return;
+
+    const axisIndex = s.options.yAxis;
+    if (typeof axisIndex !== "number") return;
+
+    // Highcharts kann dataMin/dataMax erst kennen, wenn Daten gesetzt wurden
+    const minVal = (typeof s.dataMin === "number") ? s.dataMin : null;
+    const maxVal = (typeof s.dataMax === "number") ? s.dataMax : null;
+    if (minVal == null || maxVal == null) return;
+
+    if (!dataMinMaxByAxis[axisIndex]) {
+      dataMinMaxByAxis[axisIndex] = { min: minVal, max: maxVal, hasData: true };
+    } else {
+      dataMinMaxByAxis[axisIndex].min = Math.min(dataMinMaxByAxis[axisIndex].min, minVal);
+      dataMinMaxByAxis[axisIndex].max = Math.max(dataMinMaxByAxis[axisIndex].max, maxVal);
+      dataMinMaxByAxis[axisIndex].hasData = true;
+    }
+  });
+
+  // Achsen updaten
   chartInstance.yAxis.forEach(function (axis, idx) {
-    const useAxis = usedAxisIndexes.has(idx);
-    const cfg = useAxis ? yAxisRanges[idx] : { min: null, max: null, title: "" };
+    // Achse unbenutzt -> ausblenden/neutral
+    if (!usedAxisIndexes.has(idx)) {
+      axis.update({ min: null, max: null, title: { text: "" } }, false);
+      return;
+    }
+
+    const def = defaultRanges[idx] || { min: null, max: null, title: "" };
+    const mm = dataMinMaxByAxis[idx];
+
+    let newMin = def.min;
+    let newMax = def.max;
+
+    // Wenn wir Daten haben und diese außerhalb Default liegen -> AUTO
+    if (mm && mm.hasData) {
+      if (typeof def.min === "number" && mm.min < def.min) newMin = null;
+      if (typeof def.max === "number" && mm.max > def.max) newMax = null;
+
+      // falls keine Default-Grenzen definiert sind, sowieso auto
+      if (def.min == null) newMin = null;
+      if (def.max == null) newMax = null;
+    }
 
     axis.update(
-      { min: cfg.min, max: cfg.max, title: { text: cfg.title } },
+      {
+        min: newMin,
+        max: newMax,
+        title: { text: def.title }
+      },
       false
     );
   });
 
   chartInstance.redraw();
 }
+
 
 
 // ============================================================
@@ -978,7 +996,7 @@ function addAllSeriesAndBuildLegend(addressDefinitions, options) {
         let yIdx = (def.yAxis != null) ? def.yAxis : 0;
 
         switch (typ) {
-          case "Auslastung": yIdx = 0; break;
+          case "Auslastung": yIdx = 7; break;
           case "Füllstandsmessung": yIdx = 2; break;
           case "Druckmessung": yIdx = 3; break;
           case "Durchflussmessung": yIdx = 4; break;
@@ -1549,7 +1567,7 @@ function createChart() {
       }
     },
 
-    yAxis: Array.from({ length: 7 }, function (_, i) {
+    yAxis: Array.from({ length: 8 }, function (_, i) {
       return { title: { text: "" }, opposite: i === 1 };
     }),
 
@@ -1557,7 +1575,9 @@ function createChart() {
       series: {
         boostThreshold: 2000,
         label: { enabled: true, connectorAllowed: false, style: { fontSize: "14px" } },
-        marker: { enabled: false }
+        marker: { enabled: false },
+        connectNulls: true,
+        gapSize: 0
       }
     },
 
@@ -1668,46 +1688,36 @@ function loadSortThenStart() {
 }
 
 
+
 // ============================================================
 // 14) BUTTONS (Load + Live + Shift Left/Right)
 // ============================================================
-
 function wireButtons() {
   const loadButton = document.getElementById("loadBtn");
   const shiftLeftBtn = document.getElementById("shiftLeftBtn");
   const shiftRightBtn = document.getElementById("shiftRightBtn");
   const liveBtn = document.getElementById("liveBtn");
 
-  // ------------------------------------------------------------
-  // Helper: Shift-Buttons aktiv / deaktiv
-  // ------------------------------------------------------------
   function updateShiftButtons() {
     const disabled = isLiveMode;
 
     [shiftLeftBtn, shiftRightBtn].forEach(function (btn) {
       if (!btn) return;
-
       btn.disabled = disabled;
       btn.style.opacity = disabled ? "0.4" : "1.0";
       btn.style.cursor = disabled ? "not-allowed" : "pointer";
     });
   }
 
-  // ------------------------------------------------------------
-  // LOAD BUTTON
-  // ------------------------------------------------------------
   if (loadButton) {
     loadButton.addEventListener("click", function () {
       reloadVisibleSeries({ setExtremes: true, updateYAxis: true, redrawOnce: true });
     });
   }
 
-  // ------------------------------------------------------------
-  // SHIFT BUTTONS (nur Historie)
-  // ------------------------------------------------------------
   function shiftTimeRange(direction) {
     if (!chartInstance) return;
-    if (isLiveMode) return; // doppelte Sicherheit
+    if (isLiveMode) return;
 
     const range = getTimeRangeFromInputs();
     const fromMs = range.from.getTime();
@@ -1736,9 +1746,6 @@ function wireButtons() {
     });
   }
 
-  // ------------------------------------------------------------
-  // LIVE BUTTON
-  // ------------------------------------------------------------
   if (!liveBtn) return;
 
   liveBtn.addEventListener("click", function () {
@@ -1752,7 +1759,6 @@ function wireButtons() {
 
     liveBtn.textContent = isLiveMode ? "T{Live}" : "T{Historie}";
 
-    // <<< HIER: Shift-Buttons aktualisieren
     updateShiftButtons();
 
     if (isLiveMode) {
@@ -1786,12 +1792,8 @@ function wireButtons() {
     }
   });
 
-  // ------------------------------------------------------------
-  // Initialer Zustand (beim Start)
-  // ------------------------------------------------------------
   updateShiftButtons();
 }
-
 
 
 // ============================================================
@@ -1811,7 +1813,7 @@ webMI.libraryLoader.load(
   [],
   function () {
     webMI.addOnload(function () {
-      Language = top.language;
+      uiLanguage = top.language;
 
       const now = new Date();
       const defaultRangeMs = (parseInt(queryParams.Zeitbereich, 10) || (24 * 3600 * 1000));
@@ -1826,5 +1828,3 @@ webMI.libraryLoader.load(
     });
   }
 );
-]]></script>
-</svg>
